@@ -13,6 +13,9 @@ const seedFiles: Record<FontSeedId, string> = {
   rubik: "rubik.ttf",
   "russo-one": "russo-one.ttf",
   pacifico: "pacifico.ttf",
+  montserrat: "montserrat.ttf",
+  "pt-sans": "pt-sans.ttf",
+  arsenal: "arsenal.ttf",
 };
 
 const promptPool = [
@@ -49,7 +52,7 @@ export default function App() {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [recipe, setRecipe] = useState<GeneratedRecipe>(initialRecipe);
   const [familyName, setFamilyName] = useState(initialRecipe.familyName);
-  const [font, setFont] = useState<Font | null>(null);
+  const [fonts, setFonts] = useState<Font[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [previewText, setPreviewText] = useState("Шрифт создаёт характер");
@@ -73,22 +76,22 @@ export default function App() {
   const pair = `${pairLeft.slice(0, 1)}${pairRight.slice(0, 1)}`;
   const pairValue = kerning[pair] ?? 0;
 
-  const loadSeed = useCallback(async (seedId: FontSeedId) => {
+  const loadSeeds = useCallback(async (seedIds: FontSeedId[]) => {
     setLoading(true);
-    try { setFont(await loadFont(baseUrl(`fonts/${seedFiles[seedId]}`))); }
+    try { setFonts(await Promise.all(seedIds.map((seedId) => loadFont(baseUrl(`fonts/${seedFiles[seedId]}`))))); }
     catch { setToast("Не удалось инициализировать контурный движок"); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { void loadSeed(recipe.seedId); }, [recipe.seedId, loadSeed]);
+  useEffect(() => { void loadSeeds(recipe.seedIds); }, [recipe.seedIds, loadSeeds]);
 
   const currentSettings = useCallback((): TransformSettings => ({ familyName: familyName.trim() || recipe.familyName, width, slant, contrast, roundness, tracking, morphSeed: recipe.morphSeed, style: activeStyle, kerning }), [familyName, recipe.familyName, recipe.morphSeed, width, slant, contrast, roundness, tracking, activeStyle, kerning]);
 
   const render = useCallback(() => {
-    if (!canvasRef.current || !font || !activeStyle) return;
+    if (!canvasRef.current || !fonts.length || !activeStyle) return;
     const { familyName: _name, ...settings } = currentSettings();
     void _name;
-    drawPreview(canvasRef.current, font, previewText, settings, fontSize, showGuides);
-  }, [font, previewText, activeStyle, currentSettings, fontSize, showGuides]);
+    drawPreview(canvasRef.current, fonts, previewText, settings, fontSize, showGuides);
+  }, [fonts, previewText, activeStyle, currentSettings, fontSize, showGuides]);
 
   useEffect(() => {
     render();
@@ -126,17 +129,17 @@ export default function App() {
   }
 
   async function handleExport(type: "otf" | "ttf" | "svg") {
-    if (!font || !activeStyle) return;
+    if (!fonts.length || !activeStyle) return;
     setExporting(type);
     try {
-      if (type === "svg") exportTextSvg(font, currentSettings(), previewText);
-      else await exportFont(font, currentSettings(), type);
+      if (type === "svg") exportTextSvg(fonts, currentSettings(), previewText);
+      else await exportFont(fonts, currentSettings(), type);
       setToast(type === "svg" ? "Тестовая строка экспортирована в SVG" : `${type.toUpperCase()} готов к скачиванию`);
     } catch (error) { console.error(error); setToast(`Не удалось собрать ${type.toUpperCase()}`); }
     finally { setExporting(null); }
   }
 
-  const glyphCount = font?.glyphs.length ?? 0;
+  const glyphCount = fonts[0]?.glyphs.length ?? 0;
 
   return (
     <main className="studio-shell no-topbar">
@@ -202,9 +205,9 @@ export default function App() {
       </section>
 
       <footer className="exportbar"><div className="export-title"><span>03</span><div><b>Готово к экспорту</b><small>{familyName || "Untitled Fontgen"} / {activeStyle?.name} · {glyphCount} глифов</small></div></div><div className="export-actions">
-        <button onClick={() => void handleExport("svg")} disabled={!font || exporting !== null}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Только тестовый текст</small></div></button>
-        <button onClick={() => void handleExport("ttf")} disabled={!font || exporting !== null}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>Вся гарнитура</small></div></button>
-        <button className="primary" onClick={() => void handleExport("otf")} disabled={!font || exporting !== null}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>Вся гарнитура</small></div></button>
+        <button onClick={() => void handleExport("svg")} disabled={!fonts.length || exporting !== null}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Только тестовый текст</small></div></button>
+        <button onClick={() => void handleExport("ttf")} disabled={!fonts.length || exporting !== null}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>Вся гарнитура</small></div></button>
+        <button className="primary" onClick={() => void handleExport("otf")} disabled={!fonts.length || exporting !== null}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>Вся гарнитура</small></div></button>
       </div></footer>
       {toast && <div className="toast"><span>●</span>{toast}</div>}
     </main>

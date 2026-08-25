@@ -22,43 +22,113 @@ export async function loadFont(url: string): Promise<OTFont> {
   return opentype.parse(await response.arrayBuffer());
 }
 
-function commandPoint(command: NumericCommand) {
-  const x = Number(command.x);
-  const y = Number(command.y);
-  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
-}
-
-function smoothingDeltas(source: OTPath, amount: number) {
-  const deltas = new Map<number, { x: number; y: number }>();
-  if (amount <= 0) return deltas;
-  const contours: number[][] = [];
-  let contour: number[] = [];
-
-  source.commands.forEach((raw, index) => {
-    const command = raw as unknown as NumericCommand;
-    if (command.type === "M" && contour.length) { contours.push(contour); contour = []; }
-    if (command.type !== "Z" && commandPoint(command)) contour.push(index);
-    if (command.type === "Z" && contour.length) { contours.push(contour); contour = []; }
-  });
-  if (contour.length) contours.push(contour);
-
-  for (const indices of contours) {
-    if (indices.length < 3) continue;
-    indices.forEach((index, position) => {
-      const previous = commandPoint(source.commands[indices[(position - 1 + indices.length) % indices.length]] as unknown as NumericCommand)!;
-      const current = commandPoint(source.commands[index] as unknown as NumericCommand)!;
-      const next = commandPoint(source.commands[indices[(position + 1) % indices.length]] as unknown as NumericCommand)!;
-      const targetX = (previous.x + current.x * 2 + next.x) / 4;
-      const targetY = (previous.y + current.y * 2 + next.y) / 4;
-      deltas.set(index, { x: (targetX - current.x) * amount, y: (targetY - current.y) * amount });
+function roundLinearContours(source: OTPath, roundness: number) {
+  if (roundness <= 0) return source;
+  const output = new opentype.Path();
+  let contour: typeof source.commands = [];
+  const flush = (closed: boolean) => {
+    if (!contour.length) return;
+    const isLinear = closed && contour.length >= 3 && contour.every((command) => command.type === "M" || command.type === "L");
+    if (!isLinear) {
+      output.commands.push(...contour.map((command) => ({ ...command })));
+      if (closed) output.commands.push({ type: "Z" });
+      contour = [];
+      return;
+    }
+    const points = contour.map((command) => ({ x: Number((command as unknown as NumericCommand).x), y: Number((command as unknown as NumericCommand).y) }));
+    const fraction = .015 + Math.pow(roundness / 100, 1.2) * .17;
+    const corners = points.map((point, index) => {
+      const previous = points[(index - 1 + points.length) % points.length];
+      const next = points[(index + 1) % points.length];
+      return {
+        point,
+        incoming: { x: point.x + (previous.x - point.x) * fraction, y: point.y + (previous.y - point.y) * fraction },
+        outgoing: { x: point.x + (next.x - point.x) * fraction, y: point.y + (next.y - point.y) * fraction },
+      };
     });
+    output.commands.push({ type: "M", x: corners[0].outgoing.x, y: corners[0].outgoing.y });
+    for (let index = 1; index < corners.length; index += 1) {
+      const corner = corners[index];
+      output.commands.push({ type: "L", x: corner.incoming.x, y: corner.incoming.y });
+      output.commands.push({ type: "Q", x1: corner.point.x, y1: corner.point.y, x: corner.outgoing.x, y: corner.outgoing.y });
+    }
+    output.commands.push({ type: "L", x: corners[0].incoming.x, y: corners[0].incoming.y });
+    output.commands.push({ type: "Q", x1: corners[0].point.x, y1: corners[0].point.y, x: corners[0].outgoing.x, y: corners[0].outgoing.y });
+    output.commands.push({ type: "Z" });
+    contour = [];
+  };
+  for (const command of source.commands) {
+    if (command.type === "M" && contour.length) flush(false);
+    if (command.type === "Z") flush(true);
+    else contour.push(command);
   }
-  return deltas;
+  flush(false);
+  return output;
 }
 
-export function synthesizePath(source: OTPath, settings: Omit<TransformSettings, "familyName" | "tracking" | "kerning">) {
+type Profile = { min: number[]; max: number[] };
+const PROFILE_BINS = 48;
+
+function pathProfile(path: OTPath): Profile {
+  const bounds = path.getBoundingBox();
+  const width = Math.max(1, bounds.x2 - bounds.x1);
+  const height = Math.max(1, bounds.y2 - bounds.y1);
+  const min = Array(PROFILE_BINS).fill(Number.POSITIVE_INFINITY) as number[];
+  const max = Array(PROFILE_BINS).fill(Number.NEGATIVE_INFINITY) as number[];
+  for (const raw of path.commands) {
+    const command = raw as unknown as NumericCommand;
+    for (const key of ["x", "x1", "x2"] as PointKey[]) {
+      const yKey = key === "x" ? "y" : key === "x1" ? "y1" : "y2";
+      const x = Number(command[key]);
+      const y = Number(command[yKey]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const normalizedY = Math.max(0, Math.min(.9999, (y - bounds.y1) / height));
+      const bin = Math.floor(normalizedY * PROFILE_BINS);
+      const normalizedX = (x - bounds.x1) / width;
+      min[bin] = Math.min(min[bin], normalizedX);
+      max[bin] = Math.max(max[bin], normalizedX);
+    }
+  }
+  for (let index = 0; index < PROFILE_BINS; index += 1) {
+    if (Number.isFinite(min[index])) continue;
+    let distance = 1;
+    while (distance < PROFILE_BINS) {
+      const before = index - distance;
+      const after = index + distance;
+      const found = before >= 0 && Number.isFinite(min[before]) ? before : after < PROFILE_BINS && Number.isFinite(min[after]) ? after : -1;
+      if (found >= 0) { min[index] = min[found]; max[index] = max[found]; break; }
+      distance += 1;
+    }
+    if (!Number.isFinite(min[index])) { min[index] = 0; max[index] = 1; }
+  }
+  // A small vertical blur prevents bin edges from becoming visible in curves.
+  for (let pass = 0; pass < 5; pass += 1) {
+    const nextMin = [...min], nextMax = [...max];
+    for (let index = 1; index < PROFILE_BINS - 1; index += 1) {
+      nextMin[index] = (min[index - 1] + min[index] * 2 + min[index + 1]) / 4;
+      nextMax[index] = (max[index - 1] + max[index] * 2 + max[index + 1]) / 4;
+    }
+    min.splice(0, min.length, ...nextMin); max.splice(0, max.length, ...nextMax);
+  }
+  return { min, max };
+}
+
+function sampleProfile(profile: Profile, normalizedY: number) {
+  const position = Math.max(0, Math.min(PROFILE_BINS - 1.001, normalizedY * (PROFILE_BINS - 1)));
+  const lower = Math.floor(position);
+  const upper = Math.min(PROFILE_BINS - 1, lower + 1);
+  const linearMix = position - lower;
+  const mix = linearMix * linearMix * (3 - 2 * linearMix);
+  return {
+    min: profile.min[lower] * (1 - mix) + profile.min[upper] * mix,
+    max: profile.max[lower] * (1 - mix) + profile.max[upper] * mix,
+  };
+}
+
+export function synthesizePath(source: OTPath, references: OTPath[], settings: Omit<TransformSettings, "familyName" | "tracking" | "kerning">) {
   const path = new opentype.Path();
-  const bounds = source.getBoundingBox();
+  const geometry = roundLinearContours(source, settings.roundness);
+  const bounds = geometry.getBoundingBox();
   const width = Math.max(1, bounds.x2 - bounds.x1);
   const height = Math.max(1, bounds.y2 - bounds.y1);
   const centerX = (bounds.x1 + bounds.x2) / 2;
@@ -68,33 +138,56 @@ export function synthesizePath(source: OTPath, settings: Omit<TransformSettings,
   const shear = Math.tan((-styleSlant * Math.PI) / 180);
   const weightGain = (settings.style.weight - 400) / 500 * .075;
   const contrastGain = (settings.contrast - 50) / 50 * .2;
-  const roundAmount = Math.pow(settings.roundness / 100, 1.35) * .72;
-  const deltas = smoothingDeltas(source, roundAmount);
   const phase = (settings.morphSeed % 997) / 997 * Math.PI * 2;
-  const organic = 2 + (settings.morphSeed % 7);
+  const organic = .35 + (settings.morphSeed % 7) * .13;
+  const sourceProfile = pathProfile(geometry);
+  const referenceProfiles = references.filter((path) => path.commands.length > 0).map(pathProfile);
+  const sourceAspect = width / height;
+  const targetAspect = references.length
+    ? references.reduce((sum, path, index) => { const box = path.getBoundingBox(); return sum + Math.max(.15, (box.x2 - box.x1) / Math.max(1, box.y2 - box.y1)) / (index + 1); }, 0) / references.reduce((sum, _path, index) => sum + 1 / (index + 1), 0)
+    : sourceAspect;
+  const constructionAnchors = [.15, .5, .85].map((position) => {
+    const own = sampleProfile(sourceProfile, position);
+    let targetMin = own.min, targetMax = own.max, weightTotal = 1;
+    referenceProfiles.forEach((profile, index) => {
+      const weight = 1 / (index + 2);
+      const band = sampleProfile(profile, position);
+      targetMin += band.min * weight; targetMax += band.max * weight; weightTotal += weight;
+    });
+    targetMin /= weightTotal; targetMax /= weightTotal;
+    const ownSpan = Math.max(.08, own.max - own.min);
+    const targetSpan = Math.max(.08, targetMax - targetMin);
+    return {
+      scale: Math.max(.82, Math.min(1.18, targetSpan / ownSpan)),
+      shift: ((targetMin + targetMax) - (own.min + own.max)) / 2,
+    };
+  });
+  const quadratic = (a: number, b: number, c: number, position: number) => a * (1 - position) * (1 - position) + 2 * b * (1 - position) * position + c * position * position;
 
   const transform = (x: number, y: number) => {
-    const normalizedY = (y - bounds.y1) / height;
+    const normalizedY = Math.max(0, Math.min(1, (y - bounds.y1) / height));
+    const constructionScale = Math.max(.72, Math.min(1.32, targetAspect / sourceAspect));
+    const profileScale = quadratic(constructionAnchors[0].scale, constructionAnchors[1].scale, constructionAnchors[2].scale, normalizedY);
+    const profileShift = quadratic(constructionAnchors[0].shift, constructionAnchors[1].shift, constructionAnchors[2].shift, normalizedY) * width;
     const stress = Math.cos(normalizedY * Math.PI * 2 + phase * .17);
     const localWidth = xScale * (1 + contrastGain * stress);
-    const promptWarp = Math.sin((x - bounds.x1) / width * Math.PI * 3 + normalizedY * 2 + phase) * organic;
+    const reconstructedX = centerX + (x - centerX) * profileScale + profileShift * .34;
+    const promptWarp = Math.sin((x - bounds.x1) / width * Math.PI * 2 + normalizedY * 1.5 + phase) * organic;
     return {
-      x: centerX * xScale + (x - centerX) * (localWidth + weightGain) + y * shear + promptWarp,
-      y: centerY + (y - centerY) * (1 + weightGain * .16) + Math.cos(normalizedY * Math.PI * 3 + phase) * organic * .35,
+      x: centerX * xScale + (reconstructedX - centerX) * (localWidth * constructionScale + weightGain) + y * shear + promptWarp,
+      y: centerY + (y - centerY) * (1 + weightGain * .12),
     };
   };
 
-  source.commands.forEach((raw, index) => {
+  geometry.commands.forEach((raw) => {
     const command = raw as unknown as NumericCommand;
     const next = { ...raw } as typeof raw;
-    const endpointDelta = deltas.get(index) ?? { x: 0, y: 0 };
     for (const key of ["x", "x1", "x2"] as PointKey[]) {
       const yKey = key === "x" ? "y" : key === "x1" ? "y1" : "y2";
       const x = Number(command[key]);
       const y = Number(command[yKey]);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const deltaFactor = key === "x" ? 1 : key === "x1" ? .35 : .7;
-      const point = transform(x + endpointDelta.x * deltaFactor, y + endpointDelta.y * deltaFactor);
+      const point = transform(x, y);
       (next as unknown as NumericCommand)[key] = point.x;
       (next as unknown as NumericCommand)[yKey] = point.y;
     }
@@ -103,7 +196,15 @@ export function synthesizePath(source: OTPath, settings: Omit<TransformSettings,
   return path;
 }
 
-export function buildFont(source: OTFont, settings: TransformSettings): OTFont {
+function matchingReferencePaths(sources: OTFont[], unicode: number | undefined) {
+  if (unicode === undefined) return [];
+  const character = String.fromCodePoint(unicode);
+  return sources.slice(1).map((font) => font.charToGlyph(character)).filter((glyph) => glyph.index !== 0 && glyph.path.commands.length > 0).map((glyph) => glyph.path);
+}
+
+export function buildFont(sources: OTFont[], settings: TransformSettings): OTFont {
+  const source = sources[0];
+  if (!source) throw new Error("No construction sources loaded");
   const glyphs: OTGlyph[] = [];
   for (let index = 0; index < source.glyphs.length; index += 1) {
     const original = source.glyphs.get(index);
@@ -113,7 +214,7 @@ export function buildFont(source: OTFont, settings: TransformSettings): OTFont {
       unicode: original.unicode,
       unicodes: original.unicodes,
       advanceWidth: Math.max(0, Math.round((original.advanceWidth ?? source.unitsPerEm) * settings.width / 100 + settings.tracking + (settings.style.weight - 400) * .08)),
-      path: synthesizePath(original.path, settings),
+      path: synthesizePath(original.path, matchingReferencePaths(sources, original.unicode), settings),
     }));
   }
 
@@ -153,8 +254,8 @@ function download(data: BlobPart, name: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-export async function exportFont(source: OTFont, settings: TransformSettings, type: "otf" | "ttf") {
-  const generated = buildFont(source, settings);
+export async function exportFont(sources: OTFont[], settings: TransformSettings, type: "otf" | "ttf") {
+  const generated = buildFont(sources, settings);
   const otf = generated.toArrayBuffer();
   const filename = `${safeName(settings.familyName)}-${safeName(settings.style.name)}`;
   if (type === "otf") {
@@ -166,8 +267,8 @@ export async function exportFont(source: OTFont, settings: TransformSettings, ty
   download(editorFont.write({ type: "ttf", hinting: false }) as BlobPart, `${filename}.ttf`, "font/ttf");
 }
 
-export function createTextSvg(source: OTFont, settings: TransformSettings, text: string) {
-  const generated = buildFont(source, settings);
+export function createTextSvg(sources: OTFont[], settings: TransformSettings, text: string) {
+  const generated = buildFont(sources, settings);
   const content = text || "Fontgen";
   const path = generated.getPath(content, 0, 0, generated.unitsPerEm, { kerning: true });
   const box = path.getBoundingBox();
@@ -181,12 +282,14 @@ export function createTextSvg(source: OTFont, settings: TransformSettings, text:
   return { svg, filename: `${safeName(settings.familyName)}-${safeName(content.slice(0, 28))}.svg` };
 }
 
-export function exportTextSvg(source: OTFont, settings: TransformSettings, text: string) {
-  const { svg, filename } = createTextSvg(source, settings, text);
+export function exportTextSvg(sources: OTFont[], settings: TransformSettings, text: string) {
+  const { svg, filename } = createTextSvg(sources, settings, text);
   download(svg, filename, "image/svg+xml;charset=utf-8");
 }
 
-export function drawPreview(canvas: HTMLCanvasElement, font: OTFont, text: string, settings: Omit<TransformSettings, "familyName">, fontSize: number, showGuides: boolean) {
+export function drawPreview(canvas: HTMLCanvasElement, fonts: OTFont[], text: string, settings: Omit<TransformSettings, "familyName">, fontSize: number, showGuides: boolean) {
+  const font = fonts[0];
+  if (!font) return;
   const rect = canvas.getBoundingClientRect();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = Math.max(1, Math.round(rect.width * dpr));
@@ -222,7 +325,7 @@ export function drawPreview(canvas: HTMLCanvasElement, font: OTFont, text: strin
 
   ctx.fillStyle = "#f1f0eb";
   glyphs.forEach((glyph, index) => {
-    const path = synthesizePath(glyph.path, settings);
+    const path = synthesizePath(glyph.path, matchingReferencePaths(fonts, glyph.unicode), settings);
     ctx.save(); ctx.translate(x, baseline); ctx.scale(scale, -scale); ctx.beginPath();
     for (const command of path.commands) {
       if (command.type === "M") ctx.moveTo(command.x, command.y);
