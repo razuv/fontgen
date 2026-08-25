@@ -11,6 +11,7 @@ export type TransformSettings = {
   morphSeed: number;
   style: FontStyle;
   kerning: Record<string, number>;
+  sourceKind?: "prototype" | "model";
 };
 
 type PointKey = "x" | "x1" | "x2";
@@ -126,6 +127,11 @@ function sampleProfile(profile: Profile, normalizedY: number) {
 }
 
 export function synthesizePath(source: OTPath, references: OTPath[], settings: Omit<TransformSettings, "familyName" | "tracking" | "kerning">) {
+  if (settings.sourceKind === "model") {
+    const path = new opentype.Path();
+    path.commands.push(...source.commands.map((command) => ({ ...command })));
+    return path;
+  }
   const path = new opentype.Path();
   const geometry = roundLinearContours(source, settings.roundness);
   const bounds = geometry.getBoundingBox();
@@ -213,7 +219,7 @@ export function buildFont(sources: OTFont[], settings: TransformSettings): OTFon
       name: glyphName,
       unicode: original.unicode,
       unicodes: original.unicodes,
-      advanceWidth: Math.max(0, Math.round((original.advanceWidth ?? source.unitsPerEm) * settings.width / 100 + settings.tracking + (settings.style.weight - 400) * .08)),
+      advanceWidth: Math.max(0, Math.round((original.advanceWidth ?? source.unitsPerEm) * (settings.sourceKind === "model" ? 1 : settings.width / 100) + settings.tracking + (settings.sourceKind === "model" ? 0 : (settings.style.weight - 400) * .08))),
       path: synthesizePath(original.path, matchingReferencePaths(sources, original.unicode), settings),
     }));
   }
@@ -307,7 +313,7 @@ export function drawPreview(canvas: HTMLCanvasElement, fonts: OTFont[], text: st
     const next = glyphs[index + 1];
     const pair = `${characters[index] ?? ""}${characters[index + 1] ?? ""}`;
     const kern = next ? (settings.kerning[pair] ?? font.getKerningValue(glyph, next)) : 0;
-    return ((glyph.advanceWidth ?? font.unitsPerEm) * settings.width / 100 + settings.tracking + (settings.style.weight - 400) * .08 + kern) * scale;
+    return ((glyph.advanceWidth ?? font.unitsPerEm) * (settings.sourceKind === "model" ? 1 : settings.width / 100) + settings.tracking + (settings.sourceKind === "model" ? 0 : (settings.style.weight - 400) * .08) + kern) * scale;
   });
   const total = advances.reduce((sum, value) => sum + value, 0);
   let x = Math.max(30, (rect.width - total) / 2);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Font } from "opentype.js";
 import { drawPreview, exportFont, exportTextSvg, loadFont, type FontStyle, type TransformSettings } from "./fontEngine";
+import { generateWithModel, modelApiUrl } from "./modelApi";
 import { generateRecipe, type FontSeedId, type GeneratedRecipe } from "./promptEngine";
 
 const seedFiles: Record<FontSeedId, string> = {
@@ -53,6 +54,10 @@ export default function App() {
   const [recipe, setRecipe] = useState<GeneratedRecipe>(initialRecipe);
   const [familyName, setFamilyName] = useState(initialRecipe.familyName);
   const [fonts, setFonts] = useState<Font[]>([]);
+  const [sourceKind, setSourceKind] = useState<"prototype" | "model">("prototype");
+  const [checkpoint, setCheckpoint] = useState("");
+  const [modelPrompt, setModelPrompt] = useState("");
+  const [modelFonts, setModelFonts] = useState<Record<string, Font>>({});
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [previewText, setPreviewText] = useState("Шрифт создаёт характер");
@@ -75,6 +80,7 @@ export default function App() {
   const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0];
   const pair = `${pairLeft.slice(0, 1)}${pairRight.slice(0, 1)}`;
   const pairValue = kerning[pair] ?? 0;
+  const needsStyleGeneration = sourceKind === "model" && !modelFonts[activeStyleId];
 
   const loadSeeds = useCallback(async (seedIds: FontSeedId[]) => {
     setLoading(true);
@@ -82,9 +88,9 @@ export default function App() {
     catch { setToast("Не удалось инициализировать контурный движок"); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { void loadSeeds(recipe.seedIds); }, [recipe.seedIds, loadSeeds]);
+  useEffect(() => { if (sourceKind === "prototype") void loadSeeds(recipe.seedIds); }, [recipe.seedIds, loadSeeds, sourceKind]);
 
-  const currentSettings = useCallback((): TransformSettings => ({ familyName: familyName.trim() || recipe.familyName, width, slant, contrast, roundness, tracking, morphSeed: recipe.morphSeed, style: activeStyle, kerning }), [familyName, recipe.familyName, recipe.morphSeed, width, slant, contrast, roundness, tracking, activeStyle, kerning]);
+  const currentSettings = useCallback((): TransformSettings => ({ familyName: familyName.trim() || recipe.familyName, width, slant, contrast, roundness, tracking, morphSeed: recipe.morphSeed, style: activeStyle, kerning, sourceKind }), [familyName, recipe.familyName, recipe.morphSeed, width, slant, contrast, roundness, tracking, activeStyle, kerning, sourceKind]);
 
   const render = useCallback(() => {
     if (!canvasRef.current || !fonts.length || !activeStyle) return;
@@ -101,13 +107,28 @@ export default function App() {
   }, [render]);
   useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(""), 2600); return () => window.clearTimeout(timeout); }, [toast]);
 
-  function generate() {
+  async function generate() {
     if (!prompt.trim()) return;
     setGenerating(true);
-    window.setTimeout(() => {
-      const next = generateRecipe(prompt);
-      setRecipe(next); setFamilyName(next.familyName); setWidth(next.width); setSlant(next.slant); setTracking(next.tracking); setContrast(next.contrast); setRoundness(next.roundness); setActiveStyleId("regular"); setGenerating(false); setToast(`Синтезирована гарнитура ${next.familyName}`);
-    }, 560);
+    const next = generateRecipe(prompt);
+    setRecipe(next); setFamilyName(next.familyName); setWidth(next.width); setSlant(next.slant); setTracking(next.tracking); setContrast(next.contrast); setRoundness(next.roundness);
+    setSourceKind("model");
+    try {
+      if (!modelApiUrl) throw new Error("MODEL_API_NOT_CONFIGURED");
+      const generated = await generateWithModel({
+        prompt, familyName: next.familyName, characters: previewText, seed: next.morphSeed,
+        controls: { weight: activeStyle.weight, width: next.width, contrast: next.contrast, roundness: next.roundness, slant: next.slant + (activeStyle.italic ? -10 : 0) },
+      });
+      const sameFamily = modelPrompt === prompt.trim();
+      setModelFonts((current) => sameFamily ? { ...current, [activeStyle.id]: generated.font } : { [activeStyle.id]: generated.font });
+      setModelPrompt(prompt.trim());
+      setFonts([generated.font]); setSourceKind("model"); setCheckpoint(generated.checkpoint);
+      setToast(`Модель сгенерировала гарнитуру ${next.familyName}`);
+    } catch (error) {
+      console.error(error);
+      setSourceKind("prototype"); setCheckpoint("");
+      setToast(error instanceof Error && error.message === "MODEL_API_NOT_CONFIGURED" ? "Нужен обученный checkpoint и VITE_MODEL_API_URL" : "Модель недоступна или checkpoint ещё не обучен");
+    } finally { setGenerating(false); }
   }
 
   function addStyle() {
@@ -120,6 +141,13 @@ export default function App() {
     const next = candidates.find((candidate) => !styles.some((style) => style.id === candidate.id));
     if (!next) { setToast("Все доступные начертания добавлены"); return; }
     setStyles((current) => [...current, next]); setActiveStyleId(next.id); setToast(`Добавлено начертание ${next.name}`);
+  }
+
+  function selectStyle(id: string) {
+    setActiveStyleId(id);
+    const generated = modelFonts[id];
+    if (sourceKind === "model" && generated) setFonts([generated]);
+    else if (sourceKind === "model") setToast("Нажмите «Создать», чтобы модель построила это начертание");
   }
 
   function removeStyle(id: string) {
@@ -145,7 +173,7 @@ export default function App() {
     <main className="studio-shell no-topbar">
       <section className="workspace">
         <aside className="panel source-panel">
-          <div className="panel-heading"><span>01</span><h2>Промпт</h2><b className="engine-mark">FONTGEN / SYNTH</b></div>
+          <div className="panel-heading"><span>01</span><h2>Промпт</h2><b className="engine-mark">FONTGEN / MODEL V0</b></div>
           <div className="prompt-box">
             <span>ОПИШИТЕ ХАРАКТЕР ШРИФТА</span>
             <textarea value={prompt} maxLength={280} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") generate(); }} />
@@ -159,21 +187,21 @@ export default function App() {
           </div>
 
           <section className="reference-search">
-            <div className="search-status"><span>● ПОИСК ЗАВЕРШЁН</span><b>{recipe.catalogSize} OPEN FAMILIES</b></div>
-            <h3>Найдены близкие конструкции</h3>
-            <p>Референсы используются как типографические координаты. Готовая гарнитура не выбирается из каталога: движок заново строит контуры с параметрами промпта.</p>
+            <div className="search-status"><span>● {sourceKind === "model" ? "MODEL OUTPUT" : "PROTOTYPE PREVIEW"}</span><b>{modelApiUrl ? "API CONNECTED" : "CHECKPOINT REQUIRED"}</b></div>
+            <h3>{sourceKind === "model" ? "Контуры созданы моделью" : "Корпус для обучения"}</h3>
+            <p>{sourceKind === "model" ? `Исходные глифы не передавались на inference. Checkpoint ${checkpoint}.` : "Показанный до обучения контур — только макет редактора. Открытые семейства станут примерами датасета, но не шаблонами во время генерации."}</p>
             <div className="reference-tags">{recipe.referenceNames.map((name, index) => <span key={name}><i>0{index + 1}</i>{name}</span>)}</div>
             <div className="synthesis-map"><i /><i /><i /><i /><b>NEW<br/>CURVES</b></div>
           </section>
-          <div className="license-note"><span>i</span><p>Скрытый индекс основан на открытых семействах Google Fonts. Новый результат получает отдельное редактируемое имя.</p></div>
+          <div className="license-note"><span>i</span><p>Модель обучается отдельно на лицензированном OFL-корпусе. GitHub Pages запускает интерфейс, но не GPU inference.</p></div>
         </aside>
 
         <section className="stage" aria-label="Предпросмотр синтезированного шрифта">
-          <div className="stage-top"><div><span>● SYNTHESIZED OUTLINES</span><b>{recipe.referenceNames.join(" · ")} → NEW</b></div><div className="stage-actions"><button onClick={() => setShowGuides((value) => !value)} className={showGuides ? "active" : ""}>⌗ НАПРАВЛЯЮЩИЕ</button><button onClick={() => setPreviewText("Hamburgefontsiv AVATAR ТаЛА")}>↺ ТЕСТ</button></div></div>
+          <div className="stage-top"><div><span>● {sourceKind === "model" ? "NEURAL VECTOR OUTPUT" : "EDITOR PROTOTYPE"}</span><b>{sourceKind === "model" ? `CHECKPOINT ${checkpoint}` : "MODEL NOT CONNECTED"}</b></div><div className="stage-actions"><button onClick={() => setShowGuides((value) => !value)} className={showGuides ? "active" : ""}>⌗ НАПРАВЛЯЮЩИЕ</button><button onClick={() => setPreviewText("Hamburgefontsiv AVATAR ТаЛА")}>↺ ТЕСТ</button></div></div>
           <div className="canvas-wrap">
             <div className="specimen-meta"><span>SPECIMEN / {activeStyle?.name.toUpperCase()}</span><span>{fontSize} PX · SEED {String(recipe.morphSeed).slice(-4)}</span></div>
             <canvas ref={canvasRef} />
-            {loading && <div className="loader"><i /><b>Синтез контуров</b><small>поиск и реконструкция</small></div>}
+            {(loading || generating || needsStyleGeneration) && <div className="loader">{!needsStyleGeneration && <i />}<b>{generating ? "Генерация моделью" : needsStyleGeneration ? `Нужно создать ${activeStyle?.name}` : "Загрузка прототипа"}</b><small>{generating ? "новые Bézier-контуры" : needsStyleGeneration ? "каждое начертание строится отдельно" : "редактор и экспорт"}</small></div>}
             <div className="canvas-caption"><b>{familyName || "Untitled Fontgen"}</b><span>{recipe.description}</span></div>
           </div>
           <div className="test-deck"><label><span>ТЕСТОВЫЙ ТЕКСТ / ЭКСПОРТ SVG</span><input value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></label><RangeControl label="Размер" value={fontSize} min={48} max={210} unit="px" onChange={setFontSize} /></div>
@@ -182,7 +210,7 @@ export default function App() {
         <aside className="panel properties-panel">
           <div className="panel-heading properties-heading"><span>02</span><h2>Параметры</h2><button className="reset-all" onClick={() => { setWidth(recipe.width); setSlant(recipe.slant); setTracking(recipe.tracking); setContrast(recipe.contrast); setRoundness(recipe.roundness); }}>↺ СБРОС</button></div>
           <section className="result-card">
-            <div><span>СИНТЕЗИРОВАНО</span><b>● EDITABLE</b></div>
+            <div><span>{sourceKind === "model" ? "MODEL GENERATED" : "EDITOR PROTOTYPE"}</span><b>● {sourceKind === "model" ? "EDITABLE" : "NOT AI OUTPUT"}</b></div>
             <label className="family-name"><span>НАЗВАНИЕ ГАРНИТУРЫ</span><input value={familyName} maxLength={42} onChange={(event) => setFamilyName(event.target.value)} placeholder="Untitled Fontgen" /></label>
             <p>{recipe.description}</p><div className="tag-row">{recipe.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
           </section>
@@ -192,6 +220,7 @@ export default function App() {
             <RangeControl label="Наклон" value={slant} min={-18} max={12} unit="°" onChange={setSlant} />
             <RangeControl label="Контраст кривых" value={contrast} min={0} max={100} unit="%" onChange={setContrast} />
             <RangeControl label="Скругление узлов" value={roundness} min={0} max={100} unit="%" onChange={setRoundness} />
+            <small className="model-control-note">Параметры входят в conditioning и применяются при следующем запуске модели.</small>
           </div></details>
 
           <details className="property-section" open><summary>Spacing <span>−</span></summary><div className="section-body stack-controls">
@@ -199,15 +228,15 @@ export default function App() {
             <div className="kerning-editor"><div className="control-label"><span>Кернинг пары</span><output>{pairValue} u</output></div><div className="pair-inputs"><input aria-label="Левый символ" maxLength={1} value={pairLeft} onChange={(event) => setPairLeft(event.target.value)} /><i>+</i><input aria-label="Правый символ" maxLength={1} value={pairRight} onChange={(event) => setPairRight(event.target.value)} /><span className="pair-preview">{pair || "AV"}</span></div><RangeControl label="Коррекция" value={pairValue} min={-200} max={200} unit="u" onChange={(value) => setKerning((current) => ({ ...current, [pair]: value }))} /><div className="common-pairs">{["AV", "To", "Ta", "WA", "Та", "ЛА"].map((item) => <button key={item} className={pair === item ? "active" : ""} onClick={() => { const chars = Array.from(item); setPairLeft(chars[0]); setPairRight(chars[1]); }}>{item}</button>)}</div></div>
           </div></details>
 
-          <details className="property-section" open><summary>Начертания <span>−</span></summary><div className="section-body"><div className="styles-list">{styles.map((style) => <div key={style.id} className={activeStyleId === style.id ? "active" : ""}><button onClick={() => setActiveStyleId(style.id)}><span>Aa</span><b>{style.name}</b><small>{style.weight}{style.italic ? " · italic" : ""}</small></button>{styles.length > 1 && <button className="remove-style" onClick={() => removeStyle(style.id)} aria-label={`Удалить ${style.name}`}>×</button>}</div>)}</div><button className="add-style" onClick={addStyle}><span>＋</span><b>Добавить начертание</b><small>Light, Italic, Black</small></button></div></details>
-          <div className="font-meta"><span>{recipe.classification}</span><span>{glyphCount} глифов</span><span>новые контуры</span><span>OFL compatible</span></div>
+          <details className="property-section" open><summary>Начертания <span>−</span></summary><div className="section-body"><div className="styles-list">{styles.map((style) => <div key={style.id} className={activeStyleId === style.id ? "active" : ""}><button onClick={() => selectStyle(style.id)}><span>Aa</span><b>{style.name}</b><small>{style.weight}{style.italic ? " · italic" : ""}{modelFonts[style.id] ? " · ready" : ""}</small></button>{styles.length > 1 && <button className="remove-style" onClick={() => removeStyle(style.id)} aria-label={`Удалить ${style.name}`}>×</button>}</div>)}</div><button className="add-style" onClick={addStyle}><span>＋</span><b>Добавить начертание</b><small>Light, Italic, Black</small></button></div></details>
+          <div className="font-meta"><span>{recipe.classification}</span><span>{glyphCount} глифов</span><span>{sourceKind === "model" ? "model contours" : "preview only"}</span><span>OFL training corpus</span></div>
         </aside>
       </section>
 
       <footer className="exportbar"><div className="export-title"><span>03</span><div><b>Готово к экспорту</b><small>{familyName || "Untitled Fontgen"} / {activeStyle?.name} · {glyphCount} глифов</small></div></div><div className="export-actions">
-        <button onClick={() => void handleExport("svg")} disabled={!fonts.length || exporting !== null}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Только тестовый текст</small></div></button>
-        <button onClick={() => void handleExport("ttf")} disabled={!fonts.length || exporting !== null}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>Вся гарнитура</small></div></button>
-        <button className="primary" onClick={() => void handleExport("otf")} disabled={!fonts.length || exporting !== null}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>Вся гарнитура</small></div></button>
+        <button onClick={() => void handleExport("svg")} disabled={!fonts.length || exporting !== null || needsStyleGeneration}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Только тестовый текст</small></div></button>
+        <button onClick={() => void handleExport("ttf")} disabled={!fonts.length || exporting !== null || needsStyleGeneration}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>Вся гарнитура</small></div></button>
+        <button className="primary" onClick={() => void handleExport("otf")} disabled={!fonts.length || exporting !== null || needsStyleGeneration}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>Вся гарнитура</small></div></button>
       </div></footer>
       {toast && <div className="toast"><span>●</span>{toast}</div>}
     </main>

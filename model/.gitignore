@@ -1,0 +1,7 @@
+.venv/
+data/
+checkpoints/
+*.pt
+*.pth
+__pycache__/
+
