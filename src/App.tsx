@@ -1,21 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Font } from "opentype.js";
-import { drawPreview, exportFont, loadFont, type FontStyle } from "./fontEngine";
-import { generateRecipe, type FontBaseId, type GeneratedRecipe } from "./promptEngine";
+import { drawPreview, exportFont, exportTextSvg, loadFont, type FontStyle, type TransformSettings } from "./fontEngine";
+import { generateRecipe, type FontSeedId, type GeneratedRecipe } from "./promptEngine";
 
-type BaseFont = { id: FontBaseId; name: string; category: string; file: string; sample: string };
-
-const baseFonts: BaseFont[] = [
-  { id: "space-grotesk", name: "Space Grotesk", category: "Geometric sans", file: "space-grotesk.ttf", sample: "Ag" },
-  { id: "inter", name: "Inter", category: "UI sans", file: "inter.ttf", sample: "Aa" },
-  { id: "playfair-display", name: "Playfair Display", category: "High contrast serif", file: "playfair-display.ttf", sample: "Gg" },
-  { id: "pt-serif", name: "PT Serif", category: "Text serif", file: "pt-serif.ttf", sample: "Rr" },
-  { id: "roboto-mono", name: "Roboto Mono", category: "Monospaced", file: "roboto-mono.ttf", sample: "01" },
-  { id: "bebas-neue", name: "Bebas Neue", category: "Condensed display", file: "bebas-neue.ttf", sample: "AB" },
-  { id: "rubik", name: "Rubik", category: "Rounded sans", file: "rubik.ttf", sample: "Oo" },
-  { id: "russo-one", name: "Russo One", category: "Cyrillic display", file: "russo-one.ttf", sample: "ЯR" },
-  { id: "pacifico", name: "Pacifico", category: "Script", file: "pacifico.ttf", sample: "Ps" },
-];
+const seedFiles: Record<FontSeedId, string> = {
+  "space-grotesk": "space-grotesk.ttf",
+  inter: "inter.ttf",
+  "playfair-display": "playfair-display.ttf",
+  "pt-serif": "pt-serif.ttf",
+  "roboto-mono": "roboto-mono.ttf",
+  "bebas-neue": "bebas-neue.ttf",
+  rubik: "rubik.ttf",
+  "russo-one": "russo-one.ttf",
+  pacifico: "pacifico.ttf",
+};
 
 const promptPool = [
   "Современный геометрический гротеск для технологичного бренда, немного широкий, спокойный и уверенный",
@@ -28,7 +26,7 @@ const promptPool = [
   "Мягкий рукописный шрифт для упаковки шоколада",
   "Нейтральный компактный шрифт для финансового интерфейса",
 ];
-const shuffledPrompts = [...promptPool].sort(() => Math.random() - 0.5);
+const shuffledPrompts = [...promptPool].sort(() => Math.random() - .5);
 const initialPrompt = shuffledPrompts[0];
 const initialRecipe = generateRecipe(initialPrompt);
 const initialStyles: FontStyle[] = [
@@ -43,19 +41,14 @@ function baseUrl(path: string) {
 
 function RangeControl({ label, value, min, max, unit, onChange }: { label: string; value: number; min: number; max: number; unit?: string; onChange: (value: number) => void }) {
   const percent = ((value - min) / (max - min)) * 100;
-  return (
-    <label className="range-control">
-      <span><b>{label}</b><output>{value}{unit}</output></span>
-      <input aria-label={label} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} style={{ background: `linear-gradient(90deg,#dfe0dc ${percent}%,#303030 ${percent}%)` }} />
-    </label>
-  );
+  return <label className="range-control"><span><b>{label}</b><output>{value}{unit}</output></span><input aria-label={label} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} style={{ background: `linear-gradient(90deg,#dfe0dc ${percent}%,#303030 ${percent}%)` }} /></label>;
 }
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [prompt, setPrompt] = useState(initialPrompt);
   const [recipe, setRecipe] = useState<GeneratedRecipe>(initialRecipe);
-  const [selectedBase, setSelectedBase] = useState<FontBaseId>(initialRecipe.baseId);
+  const [familyName, setFamilyName] = useState(initialRecipe.familyName);
   const [font, setFont] = useState<Font | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -77,29 +70,25 @@ export default function App() {
   const startupPrompts = useMemo(() => shuffledPrompts.slice(0, 4), []);
 
   const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0];
-  const baseFont = baseFonts.find((item) => item.id === selectedBase) ?? baseFonts[0];
   const pair = `${pairLeft.slice(0, 1)}${pairRight.slice(0, 1)}`;
   const pairValue = kerning[pair] ?? 0;
 
-  const loadSelectedFont = useCallback(async (id: FontBaseId) => {
-    const selected = baseFonts.find((item) => item.id === id) ?? baseFonts[0];
+  const loadSeed = useCallback(async (seedId: FontSeedId) => {
     setLoading(true);
-    try {
-      const loaded = await loadFont(baseUrl(`fonts/${selected.file}`));
-      setFont(loaded);
-    } catch {
-      setToast("Не удалось загрузить базовый шрифт");
-    } finally {
-      setLoading(false);
-    }
+    try { setFont(await loadFont(baseUrl(`fonts/${seedFiles[seedId]}`))); }
+    catch { setToast("Не удалось инициализировать контурный движок"); }
+    finally { setLoading(false); }
   }, []);
+  useEffect(() => { void loadSeed(recipe.seedId); }, [recipe.seedId, loadSeed]);
 
-  useEffect(() => { void loadSelectedFont(selectedBase); }, [selectedBase, loadSelectedFont]);
+  const currentSettings = useCallback((): TransformSettings => ({ familyName: familyName.trim() || recipe.familyName, width, slant, contrast, roundness, tracking, morphSeed: recipe.morphSeed, style: activeStyle, kerning }), [familyName, recipe.familyName, recipe.morphSeed, width, slant, contrast, roundness, tracking, activeStyle, kerning]);
 
   const render = useCallback(() => {
     if (!canvasRef.current || !font || !activeStyle) return;
-    drawPreview(canvasRef.current, font, previewText || "Fontgen", { width, slant, tracking, style: activeStyle, kerning }, fontSize, showGuides);
-  }, [font, previewText, width, slant, tracking, activeStyle, kerning, fontSize, showGuides]);
+    const { familyName: _name, ...settings } = currentSettings();
+    void _name;
+    drawPreview(canvasRef.current, font, previewText, settings, fontSize, showGuides);
+  }, [font, previewText, activeStyle, currentSettings, fontSize, showGuides]);
 
   useEffect(() => {
     render();
@@ -107,29 +96,15 @@ export default function App() {
     if (canvasRef.current) observer.observe(canvasRef.current);
     return () => observer.disconnect();
   }, [render]);
-
-  useEffect(() => {
-    if (!toast) return;
-    const timeout = window.setTimeout(() => setToast(""), 2500);
-    return () => window.clearTimeout(timeout);
-  }, [toast]);
+  useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(""), 2600); return () => window.clearTimeout(timeout); }, [toast]);
 
   function generate() {
     if (!prompt.trim()) return;
     setGenerating(true);
     window.setTimeout(() => {
       const next = generateRecipe(prompt);
-      setRecipe(next);
-      setSelectedBase(next.baseId);
-      setWidth(next.width);
-      setSlant(next.slant);
-      setTracking(next.tracking);
-      setContrast(next.contrast);
-      setRoundness(next.roundness);
-      setActiveStyleId("regular");
-      setGenerating(false);
-      setToast(`Создан ${next.familyName}`);
-    }, 520);
+      setRecipe(next); setFamilyName(next.familyName); setWidth(next.width); setSlant(next.slant); setTracking(next.tracking); setContrast(next.contrast); setRoundness(next.roundness); setActiveStyleId("regular"); setGenerating(false); setToast(`Синтезирована гарнитура ${next.familyName}`);
+    }, 560);
   }
 
   function addStyle() {
@@ -141,9 +116,7 @@ export default function App() {
     ];
     const next = candidates.find((candidate) => !styles.some((style) => style.id === candidate.id));
     if (!next) { setToast("Все доступные начертания добавлены"); return; }
-    setStyles((current) => [...current, next]);
-    setActiveStyleId(next.id);
-    setToast(`Добавлено начертание ${next.name}`);
+    setStyles((current) => [...current, next]); setActiveStyleId(next.id); setToast(`Добавлено начертание ${next.name}`);
   }
 
   function removeStyle(id: string) {
@@ -156,134 +129,83 @@ export default function App() {
     if (!font || !activeStyle) return;
     setExporting(type);
     try {
-      await exportFont(font, { familyName: recipe.familyName, width, slant, tracking, style: activeStyle, kerning }, type);
-      setToast(`${type.toUpperCase()} готов к скачиванию`);
-    } catch (error) {
-      console.error(error);
-      setToast(`Не удалось собрать ${type.toUpperCase()}`);
-    } finally {
-      setExporting(null);
-    }
+      if (type === "svg") exportTextSvg(font, currentSettings(), previewText);
+      else await exportFont(font, currentSettings(), type);
+      setToast(type === "svg" ? "Тестовая строка экспортирована в SVG" : `${type.toUpperCase()} готов к скачиванию`);
+    } catch (error) { console.error(error); setToast(`Не удалось собрать ${type.toUpperCase()}`); }
+    finally { setExporting(null); }
   }
 
   const glyphCount = font?.glyphs.length ?? 0;
-  const metadata = useMemo(() => [recipe.classification, `${glyphCount} глифов`, "OFL 1.1"], [recipe.classification, glyphCount]);
 
   return (
-    <main className="studio-shell">
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="Fontgen"><span>Fg</span> FONTGEN</a>
-        <div className="status-pill"><i /> LOCAL ENGINE <b>{loading ? "LOAD" : "READY"}</b></div>
-        <button className="top-action" onClick={() => void handleExport("otf")}>Экспортировать шрифт ↗</button>
-      </header>
-
+    <main className="studio-shell no-topbar">
       <section className="workspace">
         <aside className="panel source-panel">
-          <div className="panel-heading"><span>01</span><h2>Промпт и база</h2></div>
-          <label className="prompt-box">
+          <div className="panel-heading"><span>01</span><h2>Промпт</h2><b className="engine-mark">FONTGEN / SYNTH</b></div>
+          <div className="prompt-box">
             <span>ОПИШИТЕ ХАРАКТЕР ШРИФТА</span>
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") generate(); }} />
-            <div className="startup-prompts" aria-label="Случайные тестовые промпты">
-              {startupPrompts.map((example, index) => <button type="button" key={example} onClick={() => setPrompt(example)} title={example}>{index + 1}</button>)}
-              <span>СЛУЧАЙНЫЕ ПРОМПТЫ</span>
-            </div>
-            <div><small>{prompt.length}/280 · ⌘↵</small><button onClick={generate} disabled={generating}>{generating ? "СОЗДАЮ…" : "СОЗДАТЬ ↗"}</button></div>
-          </label>
+            <textarea value={prompt} maxLength={280} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") generate(); }} />
+            <div className="startup-prompts" aria-label="Случайные тестовые промпты">{startupPrompts.map((example, index) => <button type="button" key={example} onClick={() => setPrompt(example)} title={example}>{index + 1}</button>)}<span>СЛУЧАЙНЫЕ ПРОМПТЫ</span></div>
+            <div><small>{prompt.length}/280 · ⌘↵</small><button onClick={generate} disabled={generating}>{generating ? "СИНТЕЗ…" : "СОЗДАТЬ ↗"}</button></div>
+          </div>
 
           <div className="prompt-examples">
-            <div className="section-title"><span>НАПРАВЛЕНИЯ</span><b>{startupPrompts.length}</b></div>
+            <div className="section-title"><span>БЫСТРЫЙ ТЕСТ</span><b>{startupPrompts.length}</b></div>
             {startupPrompts.map((example, index) => <button key={example} onClick={() => setPrompt(example)}><i>0{index + 1}</i><span>{example}</span><b>↗</b></button>)}
           </div>
 
-          <div className="font-library">
-            <div className="section-title"><span>GOOGLE FONTS · БАЗА</span><b>{baseFonts.length}</b></div>
-            <div className="font-list">
-              {baseFonts.map((item) => (
-                <button key={item.id} className={selectedBase === item.id ? "active" : ""} onClick={() => setSelectedBase(item.id)}>
-                  <span className={`font-thumb font-${item.id}`}>{item.sample}</span>
-                  <span><strong>{item.name}</strong><small>{item.category}</small></span>
-                  <i>{selectedBase === item.id ? "●" : "○"}</i>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="license-note"><span>i</span><p>Базовые гарнитуры: Google Fonts. Производный шрифт получает новое имя и сохраняет лицензию OFL.</p></div>
+          <section className="reference-search">
+            <div className="search-status"><span>● ПОИСК ЗАВЕРШЁН</span><b>{recipe.catalogSize} OPEN FAMILIES</b></div>
+            <h3>Найдены близкие конструкции</h3>
+            <p>Референсы используются как типографические координаты. Готовая гарнитура не выбирается из каталога: движок заново строит контуры с параметрами промпта.</p>
+            <div className="reference-tags">{recipe.referenceNames.map((name, index) => <span key={name}><i>0{index + 1}</i>{name}</span>)}</div>
+            <div className="synthesis-map"><i /><i /><i /><i /><b>NEW<br/>CURVES</b></div>
+          </section>
+          <div className="license-note"><span>i</span><p>Скрытый индекс основан на открытых семействах Google Fonts. Новый результат получает отдельное редактируемое имя.</p></div>
         </aside>
 
-        <section className="stage" aria-label="Предпросмотр шрифта">
-          <div className="stage-top">
-            <div><span>● LIVE OUTLINES</span><b>{baseFont.name} → {recipe.familyName}</b></div>
-            <div className="stage-actions"><button onClick={() => setShowGuides((value) => !value)} className={showGuides ? "active" : ""}>⌗ НАПРАВЛЯЮЩИЕ</button><button onClick={() => setPreviewText("Hamburgefontsiv AVATAR ТаЛА")}>↺ ТЕСТ</button></div>
-          </div>
-
+        <section className="stage" aria-label="Предпросмотр синтезированного шрифта">
+          <div className="stage-top"><div><span>● SYNTHESIZED OUTLINES</span><b>{recipe.referenceNames.join(" · ")} → NEW</b></div><div className="stage-actions"><button onClick={() => setShowGuides((value) => !value)} className={showGuides ? "active" : ""}>⌗ НАПРАВЛЯЮЩИЕ</button><button onClick={() => setPreviewText("Hamburgefontsiv AVATAR ТаЛА")}>↺ ТЕСТ</button></div></div>
           <div className="canvas-wrap">
-            <div className="specimen-meta"><span>SPECIMEN / {activeStyle?.name.toUpperCase()}</span><span>{fontSize} PX</span></div>
+            <div className="specimen-meta"><span>SPECIMEN / {activeStyle?.name.toUpperCase()}</span><span>{fontSize} PX · SEED {String(recipe.morphSeed).slice(-4)}</span></div>
             <canvas ref={canvasRef} />
-            {loading && <div className="loader"><i /><b>Загрузка контуров</b><small>{baseFont.name}</small></div>}
-            <div className="canvas-caption"><b>{recipe.familyName}</b><span>{recipe.description}</span></div>
+            {loading && <div className="loader"><i /><b>Синтез контуров</b><small>поиск и реконструкция</small></div>}
+            <div className="canvas-caption"><b>{familyName || "Untitled Fontgen"}</b><span>{recipe.description}</span></div>
           </div>
-
-          <div className="test-deck">
-            <label><span>ТЕСТОВЫЙ ТЕКСТ</span><input value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></label>
-            <RangeControl label="Размер" value={fontSize} min={48} max={210} unit="px" onChange={setFontSize} />
-          </div>
+          <div className="test-deck"><label><span>ТЕСТОВЫЙ ТЕКСТ / ЭКСПОРТ SVG</span><input value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></label><RangeControl label="Размер" value={fontSize} min={48} max={210} unit="px" onChange={setFontSize} /></div>
         </section>
 
         <aside className="panel properties-panel">
-          <div className="panel-heading properties-heading"><span>02</span><h2>Параметры</h2><button className="reset-all" onClick={() => { setWidth(recipe.width); setSlant(recipe.slant); setTracking(recipe.tracking); }}>↺ СБРОС</button></div>
-
+          <div className="panel-heading properties-heading"><span>02</span><h2>Параметры</h2><button className="reset-all" onClick={() => { setWidth(recipe.width); setSlant(recipe.slant); setTracking(recipe.tracking); setContrast(recipe.contrast); setRoundness(recipe.roundness); }}>↺ СБРОС</button></div>
           <section className="result-card">
-            <div><span>СГЕНЕРИРОВАНО</span><b>● VALID</b></div>
-            <h1>{recipe.familyName}</h1>
-            <p>{recipe.description}</p>
-            <div className="tag-row">{recipe.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+            <div><span>СИНТЕЗИРОВАНО</span><b>● EDITABLE</b></div>
+            <label className="family-name"><span>НАЗВАНИЕ ГАРНИТУРЫ</span><input value={familyName} maxLength={42} onChange={(event) => setFamilyName(event.target.value)} placeholder="Untitled Fontgen" /></label>
+            <p>{recipe.description}</p><div className="tag-row">{recipe.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
           </section>
 
-          <details className="property-section" open>
-            <summary>Конструкция <span>−</span></summary>
-            <div className="section-body stack-controls">
-              <RangeControl label="Ширина" value={width} min={60} max={135} unit="%" onChange={setWidth} />
-              <RangeControl label="Наклон" value={slant} min={-18} max={12} unit="°" onChange={setSlant} />
-              <RangeControl label="Контраст" value={contrast} min={0} max={100} unit="%" onChange={setContrast} />
-              <RangeControl label="Скругление" value={roundness} min={0} max={100} unit="%" onChange={setRoundness} />
-            </div>
-          </details>
+          <details className="property-section" open><summary>Конструкция <span>−</span></summary><div className="section-body stack-controls">
+            <RangeControl label="Ширина" value={width} min={60} max={135} unit="%" onChange={setWidth} />
+            <RangeControl label="Наклон" value={slant} min={-18} max={12} unit="°" onChange={setSlant} />
+            <RangeControl label="Контраст кривых" value={contrast} min={0} max={100} unit="%" onChange={setContrast} />
+            <RangeControl label="Скругление узлов" value={roundness} min={0} max={100} unit="%" onChange={setRoundness} />
+          </div></details>
 
-          <details className="property-section" open>
-            <summary>Spacing <span>−</span></summary>
-            <div className="section-body stack-controls">
-              <RangeControl label="Трекинг" value={tracking} min={-100} max={180} unit="u" onChange={setTracking} />
-              <div className="kerning-editor">
-                <div className="control-label"><span>Кернинг пары</span><output>{pairValue} u</output></div>
-                <div className="pair-inputs"><input aria-label="Левый символ" maxLength={1} value={pairLeft} onChange={(event) => setPairLeft(event.target.value)} /><i>+</i><input aria-label="Правый символ" maxLength={1} value={pairRight} onChange={(event) => setPairRight(event.target.value)} /><span className="pair-preview">{pair || "AV"}</span></div>
-                <RangeControl label="Коррекция" value={pairValue} min={-200} max={200} unit="u" onChange={(value) => setKerning((current) => ({ ...current, [pair]: value }))} />
-                <div className="common-pairs">{["AV", "To", "Ta", "WA", "Та", "ЛА"].map((item) => <button key={item} className={pair === item ? "active" : ""} onClick={() => { const chars = Array.from(item); setPairLeft(chars[0]); setPairRight(chars[1]); }}>{item}</button>)}</div>
-              </div>
-            </div>
-          </details>
+          <details className="property-section" open><summary>Spacing <span>−</span></summary><div className="section-body stack-controls">
+            <RangeControl label="Трекинг" value={tracking} min={-100} max={180} unit="u" onChange={setTracking} />
+            <div className="kerning-editor"><div className="control-label"><span>Кернинг пары</span><output>{pairValue} u</output></div><div className="pair-inputs"><input aria-label="Левый символ" maxLength={1} value={pairLeft} onChange={(event) => setPairLeft(event.target.value)} /><i>+</i><input aria-label="Правый символ" maxLength={1} value={pairRight} onChange={(event) => setPairRight(event.target.value)} /><span className="pair-preview">{pair || "AV"}</span></div><RangeControl label="Коррекция" value={pairValue} min={-200} max={200} unit="u" onChange={(value) => setKerning((current) => ({ ...current, [pair]: value }))} /><div className="common-pairs">{["AV", "To", "Ta", "WA", "Та", "ЛА"].map((item) => <button key={item} className={pair === item ? "active" : ""} onClick={() => { const chars = Array.from(item); setPairLeft(chars[0]); setPairRight(chars[1]); }}>{item}</button>)}</div></div>
+          </div></details>
 
-          <details className="property-section" open>
-            <summary>Начертания <span>−</span></summary>
-            <div className="section-body">
-              <div className="styles-list">
-                {styles.map((style) => <div key={style.id} className={activeStyleId === style.id ? "active" : ""}><button onClick={() => setActiveStyleId(style.id)}><span style={{ fontWeight: style.weight, fontStyle: style.italic ? "italic" : "normal" }}>Aa</span><b>{style.name}</b><small>{style.weight}{style.italic ? " · italic" : ""}</small></button>{styles.length > 1 && <button className="remove-style" onClick={() => removeStyle(style.id)} aria-label={`Удалить ${style.name}`}>×</button>}</div>)}
-              </div>
-              <button className="add-style" onClick={addStyle}><span>＋</span><b>Добавить начертание</b><small>Light, Italic, Black</small></button>
-            </div>
-          </details>
-
-          <div className="font-meta">{metadata.map((item) => <span key={item}>{item}</span>)}</div>
+          <details className="property-section" open><summary>Начертания <span>−</span></summary><div className="section-body"><div className="styles-list">{styles.map((style) => <div key={style.id} className={activeStyleId === style.id ? "active" : ""}><button onClick={() => setActiveStyleId(style.id)}><span>Aa</span><b>{style.name}</b><small>{style.weight}{style.italic ? " · italic" : ""}</small></button>{styles.length > 1 && <button className="remove-style" onClick={() => removeStyle(style.id)} aria-label={`Удалить ${style.name}`}>×</button>}</div>)}</div><button className="add-style" onClick={addStyle}><span>＋</span><b>Добавить начертание</b><small>Light, Italic, Black</small></button></div></details>
+          <div className="font-meta"><span>{recipe.classification}</span><span>{glyphCount} глифов</span><span>новые контуры</span><span>OFL compatible</span></div>
         </aside>
       </section>
 
-      <footer className="exportbar">
-        <div className="export-title"><span>03</span><div><b>Шрифт готов к экспорту</b><small>{recipe.familyName} / {activeStyle?.name} · {glyphCount} глифов</small></div></div>
-        <div className="export-actions">
-          <button onClick={() => void handleExport("svg")} disabled={!font || exporting !== null}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Векторные глифы</small></div></button>
-          <button onClick={() => void handleExport("ttf")} disabled={!font || exporting !== null}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>TrueType</small></div></button>
-          <button className="primary" onClick={() => void handleExport("otf")} disabled={!font || exporting !== null}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>OpenType · Recommended</small></div></button>
-        </div>
-      </footer>
+      <footer className="exportbar"><div className="export-title"><span>03</span><div><b>Готово к экспорту</b><small>{familyName || "Untitled Fontgen"} / {activeStyle?.name} · {glyphCount} глифов</small></div></div><div className="export-actions">
+        <button onClick={() => void handleExport("svg")} disabled={!font || exporting !== null}><span>◇</span><div><b>{exporting === "svg" ? "СБОРКА…" : "SVG"}</b><small>Только тестовый текст</small></div></button>
+        <button onClick={() => void handleExport("ttf")} disabled={!font || exporting !== null}><span>T</span><div><b>{exporting === "ttf" ? "СБОРКА…" : "TTF"}</b><small>Вся гарнитура</small></div></button>
+        <button className="primary" onClick={() => void handleExport("otf")} disabled={!font || exporting !== null}><span>↗</span><div><b>{exporting === "otf" ? "СБОРКА…" : "OTF"}</b><small>Вся гарнитура</small></div></button>
+      </div></footer>
       {toast && <div className="toast"><span>●</span>{toast}</div>}
     </main>
   );
