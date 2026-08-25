@@ -18,7 +18,9 @@ export async function loadFont(url: string): Promise<OTFont> {
 
 function transformedPath(source: OTPath, xScale: number, slant: number, weight: number) {
   const path = new opentype.Path();
-  const shear = Math.tan((slant * Math.PI) / 180);
+  // Font coordinates grow upwards. In the UI a negative angle means the
+  // familiar right-leaning italic, so the export transform uses the inverse.
+  const shear = Math.tan((-slant * Math.PI) / 180);
   const embolden = (weight - 400) / 1000;
   for (const command of source.commands) {
     const next = { ...command } as typeof command;
@@ -43,12 +45,16 @@ export function buildFont(source: OTFont, settings: TransformSettings): OTFont {
 
   for (let index = 0; index < source.glyphs.length; index += 1) {
     const original = source.glyphs.get(index);
+    const glyphName = original.unicode === 0 ? ".null" : (original.name ?? undefined);
     const glyph = new opentype.Glyph({
-      name: original.name ?? undefined,
+      name: glyphName,
       unicode: original.unicode,
       unicodes: original.unicodes,
       advanceWidth: Math.max(0, Math.round((original.advanceWidth ?? source.unitsPerEm) * xScale + settings.tracking)),
-      path: transformedPath(original.getPath(0, 0, source.unitsPerEm), xScale, styleSlant, settings.style.weight),
+      // `glyph.path` is expressed in native font coordinates. `getPath()` is
+      // intended for screen drawing and inverts Y, which would create an
+      // upside-down exported font if used here.
+      path: transformedPath(original.path, xScale, styleSlant, settings.style.weight),
     });
     glyphs.push(glyph);
   }
@@ -79,8 +85,11 @@ function download(data: BlobPart, name: string, type: string) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = name;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
   anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 export async function exportFont(source: OTFont, settings: TransformSettings, type: "otf" | "ttf" | "svg") {
@@ -153,7 +162,8 @@ export function drawPreview(
     const path = glyph.getPath(0, 0, font.unitsPerEm);
     ctx.save();
     ctx.translate(x, baseline);
-    ctx.scale(scale, -scale);
+    // getPath() already maps the font's upward Y axis to canvas coordinates.
+    ctx.scale(scale, scale);
     ctx.transform(widthScale, 0, shear, 1, 0, 0);
     ctx.beginPath();
     for (const command of path.commands) {
