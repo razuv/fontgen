@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,7 +10,10 @@ import torch
 from .config import ModelConfig
 from .network import FontgenNet
 from .outline import COMMAND_TO_ID, COMMANDS
-from .text import encode_prompt, glyph_bucket
+from .text import condition_v41_prompt, encode_prompt, glyph_bucket
+from .vectorize import vectorize_mask
+
+POINTS_PER_COMMAND = {"M": 1, "L": 1, "Q": 2, "C": 3, "Z": 0}
 
 
 @dataclass
@@ -22,14 +26,17 @@ class GeneratedGlyph:
 
 
 class FontgenGenerator:
+    architecture = "fontgen-style-film-vector-v4.1-local-refined"
+
     def __init__(self, checkpoint_path: Path, device: str | None = None):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         self.config = ModelConfig(**checkpoint["config"])
         self.model = FontgenNet(self.config).to(self.device)
-        self.model.load_state_dict(checkpoint["model"])
+        self.model.load_compatible_state_dict(checkpoint["model"])
         self.model.eval()
         self.checkpoint_id = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()[:12]
+        self.parameter_count = sum(parameter.numel() for parameter in self.model.parameters())
 
     @torch.inference_mode()
     def generate_glyph(
@@ -103,7 +110,47 @@ class FontgenGenerator:
         controls: list[float],
         seed: int,
     ) -> list[GeneratedGlyph]:
-        # One seeded sampler plus one prompt-derived style latent makes repeats
-        # deterministic and keeps the whole family in the same design space.
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-        return [self.generate_glyph(prompt, character, controls, generator=generator) for character in dict.fromkeys(characters)]
+        del seed  # v1 raster generator is deterministic for a prompt and control vector.
+        prompt, controls = condition_v41_prompt(prompt, controls)
+        unique_characters = list(dict.fromkeys(characters))
+        drawable = [character for character in unique_characters if not character.isspace()]
+        if not drawable:
+            return [GeneratedGlyph(character, [], [], 0.33, 0.0) for character in unique_characters]
+        batch_size = len(drawable)
+        prompts = encode_prompt(prompt, self.config.max_prompt_bytes).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+        glyph_ids = torch.tensor(
+            [glyph_bucket(character, self.config.glyph_buckets) for character in drawable],
+            device=self.device,
+        )
+        control_tensor = torch.tensor([controls], dtype=torch.float32, device=self.device).repeat(batch_size, 1)
+        conditioned = self.model.condition(prompts, glyph_ids, control_tensor)
+        fields = ((conditioned["sdf"] + 1) * 0.5).detach().cpu().numpy()[:, 0]
+        metrics_batch = conditioned["metrics"].detach().cpu().numpy()
+        generated: dict[str, GeneratedGlyph] = {}
+        for index, character in enumerate(drawable):
+            outline = vectorize_mask(fields[index], threshold=0.5, contrast=controls[2], roundness=controls[3])
+            if controls[4]:
+                shear = math.tan(math.radians(float(controls[4]) * 18.0))
+                for coordinates in outline.coordinates:
+                    for point_index in range(0, 6, 2):
+                        coordinates[point_index] += coordinates[point_index + 1] * shear
+            metrics = metrics_batch[index]
+            x_coordinates = [
+                coordinates[point_index]
+                for command, coordinates in zip(outline.commands, outline.coordinates, strict=True)
+                for point_index in range(0, POINTS_PER_COMMAND[command] * 2, 2)
+            ]
+            x_min = min(x_coordinates, default=0.0)
+            x_max = max(x_coordinates, default=0.55)
+            geometry_advance = max(x_max, x_max - min(0.0, x_min)) + 0.08
+            generated[character] = GeneratedGlyph(
+                character=character,
+                commands=outline.commands,
+                coordinates=outline.coordinates,
+                advance_width=max(0.28, min(2.0, max(float(metrics[0]), geometry_advance))),
+                left_side_bearing=max(-0.3, min(0.5, x_min)),
+            )
+        return [
+            generated.get(character, GeneratedGlyph(character, [], [], 0.33, 0.0))
+            for character in unique_characters
+        ]

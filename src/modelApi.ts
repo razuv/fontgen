@@ -14,6 +14,8 @@ type ModelResponse = {
   ascender: number;
   descender: number;
   checkpoint: string;
+  architecture: string;
+  parameter_count: number;
   glyphs: ModelGlyph[];
 };
 
@@ -44,7 +46,7 @@ function fontFromResponse(response: ModelResponse): Font {
     leftSideBearing: Math.round(glyph.left_side_bearing * response.units_per_em),
     path: glyph.character === " " ? new opentype.Path() : pathFromGlyph(glyph, response.units_per_em),
   }));
-  return new opentype.Font({
+  const font = new opentype.Font({
     familyName: response.family_name,
     styleName: "Regular",
     unitsPerEm: response.units_per_em,
@@ -52,6 +54,8 @@ function fontFromResponse(response: ModelResponse): Font {
     descender: response.descender,
     glyphs: [notdef, ...glyphs],
   });
+  font.kerningPairs = {};
+  return font;
 }
 
 export async function generateWithModel(input: {
@@ -60,7 +64,7 @@ export async function generateWithModel(input: {
   characters?: string;
   controls: ModelControls;
   seed: number;
-}): Promise<{ font: Font; checkpoint: string }> {
+}): Promise<{ font: Font; checkpoint: string; architecture: string; parameterCount: number }> {
   if (!modelApiUrl) throw new Error("MODEL_API_NOT_CONFIGURED");
   const response = await fetch(`${modelApiUrl}/v1/generate`, {
     method: "POST",
@@ -74,10 +78,14 @@ export async function generateWithModel(input: {
     }),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail || `MODEL_API_${response.status}`);
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    const detail = typeof payload?.detail === "string"
+      ? payload.detail
+      : payload?.detail
+        ? JSON.stringify(payload.detail)
+        : `MODEL_API_${response.status}`;
+    throw new Error(detail);
   }
   const payload = await response.json() as ModelResponse;
-  return { font: fontFromResponse(payload), checkpoint: payload.checkpoint };
+  return { font: fontFromResponse(payload), checkpoint: payload.checkpoint, architecture: payload.architecture, parameterCount: payload.parameter_count };
 }
-

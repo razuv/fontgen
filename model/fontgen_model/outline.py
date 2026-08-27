@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,9 +100,14 @@ def extract_glyph(font: TTFont, character: str, max_commands: int) -> EncodedGly
 def inspect_font(path: Path) -> dict[str, Any]:
     font = TTFont(path, lazy=True)
     names = font["name"]
-    family = names.getDebugName(1) or path.stem
+    family = names.getDebugName(16) or names.getDebugName(1) or path.stem
     subfamily = names.getDebugName(2) or "Regular"
     os2 = font.get("OS/2")
+    panose = getattr(os2, "panose", None)
+    google_metadata = _google_fonts_metadata(path)
+    embedded_license = names.getDebugName(13)
+    embedded_license_url = names.getDebugName(14)
+    inferred_category = _panose_category(font, panose, family)
     return {
         "path": str(path),
         "family": family,
@@ -109,6 +115,83 @@ def inspect_font(path: Path) -> dict[str, Any]:
         "weight": int(getattr(os2, "usWeightClass", 400)),
         "width": int(getattr(os2, "usWidthClass", 5)),
         "italic": bool(getattr(os2, "fsSelection", 0) & 1),
+        "panose_contrast": int(getattr(panose, "bContrast", 0)),
+        "panose_letterform": int(getattr(panose, "bLetterForm", 0)),
+        **google_metadata,
+        "license": google_metadata.get("license") or embedded_license,
+        "license_id": google_metadata.get("license") or _embedded_license_id(embedded_license),
+        "license_url": embedded_license_url,
+        "category": google_metadata.get("category") or inferred_category,
+    }
+
+
+def _embedded_license_id(license_text: str | None) -> str | None:
+    normalized = (license_text or "").lower()
+    if "open font license" in normalized or "sil ofl" in normalized:
+        return "OFL-1.1"
+    if "apache license" in normalized:
+        return "Apache-2.0"
+    if "ubuntu font licence" in normalized:
+        return "UFL-1.0"
+    return None
+
+
+def _panose_category(font: TTFont, panose: Any, family: str) -> str:
+    post = font.get("post")
+    normalized_family = family.casefold()
+    if bool(getattr(post, "isFixedPitch", 0)) or any(
+        token in normalized_family for token in ("mono", "code", "typewriter")
+    ):
+        return "MONOSPACE"
+    os2 = font.get("OS/2")
+    ibm_family_class = (int(getattr(os2, "sFamilyClass", 0)) >> 8) & 0xFF
+    if ibm_family_class == 10:
+        return "HANDWRITING"
+    if ibm_family_class == 9:
+        return "DISPLAY"
+    if ibm_family_class in {1, 2, 3, 4, 5, 7}:
+        return "SERIF"
+    if ibm_family_class == 8:
+        return "SANS_SERIF"
+    family_type = int(getattr(panose, "bFamilyType", 0))
+    serif_style = int(getattr(panose, "bSerifStyle", 0))
+    if family_type == 3:
+        return "HANDWRITING"
+    if family_type in {4, 5}:
+        return "DISPLAY"
+    if family_type == 2 and 2 <= serif_style <= 10:
+        return "SERIF"
+    if any(token in normalized_family for token in ("script", "hand", "cursive", "brush", "calligraph")):
+        return "HANDWRITING"
+    if any(token in normalized_family for token in (
+        "serif", "antiqua", "garamond", "bodoni", "didot", "baskerville", "clarendon", "slab",
+    )):
+        return "SERIF"
+    if any(token in normalized_family for token in ("display", "poster", "deco")):
+        return "DISPLAY"
+    return "SANS_SERIF"
+
+
+def _google_fonts_metadata(path: Path) -> dict[str, Any]:
+    """Read the small, stable subset of Google Fonts METADATA.pb we train on."""
+    metadata_path = path.parent / "METADATA.pb"
+    if not metadata_path.exists():
+        return {
+            "license": None, "category": None, "subsets": [],
+            "classifications": [], "stroke": None,
+        }
+    source = metadata_path.read_text(encoding="utf-8")
+
+    def scalar(name: str) -> str | None:
+        match = re.search(rf'^\s*{name}:\s*"?([^"\n]+)"?\s*$', source, re.MULTILINE)
+        return match.group(1).strip() if match else None
+
+    return {
+        "license": scalar("license"),
+        "category": scalar("category"),
+        "subsets": re.findall(r'^\s*subsets:\s*"([^"]+)"', source, re.MULTILINE),
+        "classifications": re.findall(r'^\s*classifications:\s*"([^"]+)"', source, re.MULTILINE),
+        "stroke": scalar("stroke"),
     }
 
 

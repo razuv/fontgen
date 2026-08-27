@@ -3,19 +3,18 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Protocol
 
+import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from .inference import FontgenGenerator
+from .structured_inference import StructuredFontGenerator
+from .text import SUPPORTED_CHARACTERS
 
-DEFAULT_CHARSET = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
-    "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
-    "0123456789.,:;!?—-()«»"
-)
+DEFAULT_CHARSET = SUPPORTED_CHARACTERS
 
 
 class Controls(BaseModel):
@@ -40,7 +39,7 @@ class GenerationRequest(BaseModel):
     family_name: str = Field(default="Untitled Fontgen", min_length=1, max_length=64)
     characters: str = Field(default=DEFAULT_CHARSET, min_length=1, max_length=320)
     controls: Controls = Field(default_factory=Controls)
-    seed: int = Field(default=17, ge=0, le=2**31 - 1)
+    seed: int = Field(default=17, ge=0, le=2**32 - 1)
 
     @field_validator("characters")
     @classmethod
@@ -54,10 +53,30 @@ class GenerationResponse(BaseModel):
     ascender: int = 800
     descender: int = -200
     checkpoint: str
+    architecture: str = "fontgen-style-film-vector-v4.1-local-refined"
+    parameter_count: int
     glyphs: list[dict[str, object]]
 
 
-generator: FontgenGenerator | None = None
+class Generator(Protocol):
+    checkpoint_id: str
+    parameter_count: int
+    architecture: str
+
+    def generate_family(
+        self, prompt: str, characters: str, controls: list[float], seed: int,
+    ) -> list[object]: ...
+
+
+def load_generator(checkpoint: Path) -> Generator:
+    metadata = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    architecture = metadata.get("architecture", "fontgen-style-film-vector-v4")
+    if architecture == "structured-quadratic-v1":
+        return StructuredFontGenerator(checkpoint)
+    return FontgenGenerator(checkpoint)
+
+
+generator: Generator | None = None
 checkpoint_error: str | None = None
 
 
@@ -66,7 +85,7 @@ async def lifespan(_app: FastAPI):
     global generator, checkpoint_error
     checkpoint = Path(os.environ.get("FONTGEN_CHECKPOINT", "checkpoints/fontgen-v0.pt"))
     try:
-        generator = FontgenGenerator(checkpoint)
+        generator = load_generator(checkpoint)
     except Exception as error:  # noqa: BLE001 - health must expose any checkpoint incompatibility
         checkpoint_error = f"{type(error).__name__}: {error}"
     yield
@@ -79,7 +98,14 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", 
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    return {"ok": True, "model_loaded": generator is not None, "checkpoint_error": checkpoint_error}
+    return {
+        "ok": True,
+        "model_loaded": generator is not None,
+        "checkpoint_error": checkpoint_error,
+        "checkpoint": generator.checkpoint_id if generator is not None else None,
+        "architecture": generator.architecture if generator is not None else None,
+        "parameter_count": generator.parameter_count if generator is not None else None,
+    }
 
 
 @app.post("/v1/generate", response_model=GenerationResponse)
@@ -90,5 +116,7 @@ def generate(request: GenerationRequest) -> GenerationResponse:
     return GenerationResponse(
         family_name=request.family_name,
         checkpoint=generator.checkpoint_id,
+        architecture=generator.architecture,
+        parameter_count=generator.parameter_count,
         glyphs=[glyph.__dict__ for glyph in glyphs],
     )

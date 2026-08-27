@@ -56,6 +56,7 @@ export default function App() {
   const [fonts, setFonts] = useState<Font[]>([]);
   const [sourceKind, setSourceKind] = useState<"prototype" | "model">("prototype");
   const [checkpoint, setCheckpoint] = useState("");
+  const [modelParameters, setModelParameters] = useState(0);
   const [modelPrompt, setModelPrompt] = useState("");
   const [modelFonts, setModelFonts] = useState<Record<string, Font>>({});
   const [loading, setLoading] = useState(true);
@@ -81,6 +82,9 @@ export default function App() {
   const pair = `${pairLeft.slice(0, 1)}${pairRight.slice(0, 1)}`;
   const pairValue = kerning[pair] ?? 0;
   const needsStyleGeneration = sourceKind === "model" && !modelFonts[activeStyleId];
+  const resultDescription = sourceKind === "model"
+    ? `Компактная hi-res boundary модель ${(modelParameters / 1_000_000).toFixed(2)}M. Граница Unicode-глифа строится в 128×128 с edge loss, очищается от шумовых компонент и переводится в компактные замкнутые Bézier-контуры.`
+    : recipe.description;
 
   const loadSeeds = useCallback(async (seedIds: FontSeedId[]) => {
     setLoading(true);
@@ -122,12 +126,12 @@ export default function App() {
       const sameFamily = modelPrompt === prompt.trim();
       setModelFonts((current) => sameFamily ? { ...current, [activeStyle.id]: generated.font } : { [activeStyle.id]: generated.font });
       setModelPrompt(prompt.trim());
-      setFonts([generated.font]); setSourceKind("model"); setCheckpoint(generated.checkpoint);
+      setFonts([generated.font]); setSourceKind("model"); setCheckpoint(generated.checkpoint); setModelParameters(generated.parameterCount);
       setToast(`Модель сгенерировала гарнитуру ${next.familyName}`);
     } catch (error) {
       console.error(error);
-      setSourceKind("prototype"); setCheckpoint("");
-      setToast(error instanceof Error && error.message === "MODEL_API_NOT_CONFIGURED" ? "Нужен обученный checkpoint и VITE_MODEL_API_URL" : "Модель недоступна или checkpoint ещё не обучен");
+      setSourceKind("prototype"); setCheckpoint(""); setModelParameters(0);
+      setToast(error instanceof Error && error.message === "MODEL_API_NOT_CONFIGURED" ? "Нужен обученный checkpoint и VITE_MODEL_API_URL" : `Ошибка модели: ${error instanceof Error ? error.message.slice(0, 120) : "неизвестный ответ"}`);
     } finally { setGenerating(false); }
   }
 
@@ -173,7 +177,7 @@ export default function App() {
     <main className="studio-shell no-topbar">
       <section className="workspace">
         <aside className="panel source-panel">
-          <div className="panel-heading"><span>01</span><h2>Промпт</h2><b className="engine-mark">FONTGEN / MODEL V0</b></div>
+          <div className="panel-heading"><span>01</span><h2>Промпт</h2><b className="engine-mark">FONTGEN / COMPACT 4.6M</b></div>
           <div className="prompt-box">
             <span>ОПИШИТЕ ХАРАКТЕР ШРИФТА</span>
             <textarea value={prompt} maxLength={280} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") generate(); }} />
@@ -202,7 +206,7 @@ export default function App() {
             <div className="specimen-meta"><span>SPECIMEN / {activeStyle?.name.toUpperCase()}</span><span>{fontSize} PX · SEED {String(recipe.morphSeed).slice(-4)}</span></div>
             <canvas ref={canvasRef} />
             {(loading || generating || needsStyleGeneration) && <div className="loader">{!needsStyleGeneration && <i />}<b>{generating ? "Генерация моделью" : needsStyleGeneration ? `Нужно создать ${activeStyle?.name}` : "Загрузка прототипа"}</b><small>{generating ? "новые Bézier-контуры" : needsStyleGeneration ? "каждое начертание строится отдельно" : "редактор и экспорт"}</small></div>}
-            <div className="canvas-caption"><b>{familyName || "Untitled Fontgen"}</b><span>{recipe.description}</span></div>
+            <div className="canvas-caption"><b>{familyName || "Untitled Fontgen"}</b><span>{resultDescription}</span></div>
           </div>
           <div className="test-deck"><label><span>ТЕСТОВЫЙ ТЕКСТ / ЭКСПОРТ SVG</span><input value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></label><RangeControl label="Размер" value={fontSize} min={48} max={210} unit="px" onChange={setFontSize} /></div>
         </section>
@@ -212,7 +216,7 @@ export default function App() {
           <section className="result-card">
             <div><span>{sourceKind === "model" ? "MODEL GENERATED" : "EDITOR PROTOTYPE"}</span><b>● {sourceKind === "model" ? "EDITABLE" : "NOT AI OUTPUT"}</b></div>
             <label className="family-name"><span>НАЗВАНИЕ ГАРНИТУРЫ</span><input value={familyName} maxLength={42} onChange={(event) => setFamilyName(event.target.value)} placeholder="Untitled Fontgen" /></label>
-            <p>{recipe.description}</p><div className="tag-row">{recipe.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+            <p>{resultDescription}</p><div className="tag-row">{recipe.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
           </section>
 
           <details className="property-section" open><summary>Конструкция <span>−</span></summary><div className="section-body stack-controls">

@@ -312,7 +312,7 @@ export function drawPreview(canvas: HTMLCanvasElement, fonts: OTFont[], text: st
   const advances = glyphs.map((glyph, index) => {
     const next = glyphs[index + 1];
     const pair = `${characters[index] ?? ""}${characters[index + 1] ?? ""}`;
-    const kern = next ? (settings.kerning[pair] ?? font.getKerningValue(glyph, next)) : 0;
+    const kern = next ? (settings.kerning[pair] ?? (settings.sourceKind === "model" ? 0 : font.getKerningValue(glyph, next))) : 0;
     return ((glyph.advanceWidth ?? font.unitsPerEm) * (settings.sourceKind === "model" ? 1 : settings.width / 100) + settings.tracking + (settings.sourceKind === "model" ? 0 : (settings.style.weight - 400) * .08) + kern) * scale;
   });
   const total = advances.reduce((sum, value) => sum + value, 0);
