@@ -23,26 +23,22 @@ def family_split(dataset: OutlineDataset, fraction: float, seed: int = 17) -> tu
     return Subset(dataset, training_indices), Subset(dataset, validation_indices)
 
 
-def curriculum_subset(dataset: OutlineDataset, subset: Subset, stage: str) -> Subset:
+def curriculum_weight(row: dict[str, object], stage: str) -> float:
     if stage == "full":
-        return subset
-
-    def accepted(index: int) -> bool:
-        row = dataset.rows[index]
-        category = str(row.get("category", "SANS_SERIF"))
-        controls = [float(value) for value in row.get("controls", [0.0] * 5)]
-        subfamily = str(row.get("subfamily", "")).casefold()
-        if category not in {"SANS_SERIF", "SERIF", "MONOSPACE"}:
-            return False
-        if stage == "anatomy":
-            return (
-                abs(controls[0]) <= 0.55 and abs(controls[1]) <= 0.55
-                and abs(controls[3]) <= 0.4 and abs(controls[4]) <= 0.2
-                and "italic" not in subfamily and "oblique" not in subfamily
-            )
-        return abs(controls[3]) <= 0.75 and abs(controls[4]) <= 0.6
-
-    return Subset(dataset, [index for index in subset.indices if accepted(index)])
+        return 1.0
+    category = str(row.get("category", "SANS_SERIF"))
+    controls = [float(value) for value in row.get("controls", [0.0] * 5)]
+    subfamily = str(row.get("subfamily", "")).casefold()
+    core_category = category in {"SANS_SERIF", "SERIF", "MONOSPACE"}
+    if stage == "anatomy":
+        clean_upright = (
+            core_category and abs(controls[0]) <= 0.55 and abs(controls[1]) <= 0.55
+            and abs(controls[3]) <= 0.4 and abs(controls[4]) <= 0.2
+            and "italic" not in subfamily and "oblique" not in subfamily
+        )
+        return 5.0 if clean_upright else 0.35
+    moderate_axes = core_category and abs(controls[3]) <= 0.75 and abs(controls[4]) <= 0.6
+    return 2.5 if moderate_axes else 0.6
 
 
 def main() -> None:
@@ -56,6 +52,14 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--raster-only", action="store_true", help="Train the raster path used by production inference")
+    parser.add_argument(
+        "--geometry-finetune", action="store_true",
+        help="Freeze learned prompt/style/content semantics and optimize only raster/SDF geometry",
+    )
+    parser.add_argument(
+        "--sdf-refiner-only", action="store_true",
+        help="Freeze V4.1 completely and train only the bounded local SDF correction",
+    )
     parser.add_argument("--validation-family-fraction", type=float, default=0.1)
     parser.add_argument("--balanced-styles", action="store_true", help="Balance categories and boost rounded/italic faces")
     parser.add_argument("--reset-best", action="store_true", help="Reset validation baseline after changing the corpus")
@@ -81,10 +85,6 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     dataset = OutlineDataset(args.manifest, config)
     training_set, validation_set = family_split(dataset, args.validation_family_fraction)
-    training_set = curriculum_subset(dataset, training_set, args.curriculum_stage)
-    validation_set = curriculum_subset(dataset, validation_set, args.curriculum_stage)
-    if not training_set.indices or not validation_set.indices:
-        raise ValueError(f"Curriculum stage {args.curriculum_stage} produced an empty split")
     sampler = None
     if args.balanced_styles:
         category_counts: dict[str, int] = {}
@@ -97,7 +97,10 @@ def main() -> None:
             category = str(row.get("category", "SANS_SERIF"))
             rarity_boost = 1.8 if abs(float(row["controls"][3])) > 0.5 else 1.0
             italic_boost = 1.35 if "italic" in str(row.get("subfamily", "")).lower() else 1.0
-            weights.append(rarity_boost * italic_boost / category_counts[category])
+            weights.append(
+                rarity_boost * italic_boost * curriculum_weight(row, args.curriculum_stage)
+                / category_counts[category]
+            )
         sampler = WeightedRandomSampler(
             weights, args.samples_per_epoch or len(weights), replacement=True,
         )
@@ -110,6 +113,17 @@ def main() -> None:
     if args.raster_only:
         for module in (model.command_embedding, model.coordinate_embedding, model.decoder, model.command_head, model.coordinate_head):
             module.requires_grad_(False)
+    if args.geometry_finetune:
+        model.requires_grad_(False)
+        for module in (
+            model.raster_seed, model.raster_decoder, model.raster_refiner,
+            model.sdf_coordinate_refiner, model.raster_encoder,
+            model.recognition_head, model.raster_to_model,
+        ):
+            module.requires_grad_(True)
+    if args.sdf_refiner_only:
+        model.requires_grad_(False)
+        model.sdf_coordinate_refiner.requires_grad_(True)
     optimizer = torch.optim.AdamW(
         (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=args.learning_rate, betas=(0.9, 0.95), weight_decay=0.05,
@@ -122,7 +136,11 @@ def main() -> None:
         model.load_compatible_state_dict(resumed["model"])
         start_epoch = int(resumed.get("epoch", 0))
         resumed_mode = resumed.get("training_mode", "full")
-        current_mode = "raster-only" if args.raster_only else "full"
+        current_mode = (
+            "sdf-refiner-only" if args.sdf_refiner_only else
+            "geometry-sdf" if args.geometry_finetune else
+            "raster-only" if args.raster_only else "full"
+        )
         if resumed.get("optimizer") and resumed_mode == current_mode:
             try:
                 optimizer.load_state_dict(resumed["optimizer"])
@@ -175,7 +193,11 @@ def main() -> None:
                 "model": model.state_dict(), "optimizer": optimizer.state_dict(),
                 "config": config.to_dict(), "epoch": epoch + 1,
                 "best_validation": best_validation,
-                "training_mode": "raster-only" if args.raster_only else "full",
+                "training_mode": (
+                    "sdf-refiner-only" if args.sdf_refiner_only else
+                    "geometry-sdf" if args.geometry_finetune else
+                    "raster-only" if args.raster_only else "full"
+                ),
                 "representation": "sdf-v1", "curriculum_stage": args.curriculum_stage,
             }, args.output)
             print(f"saved best validation={best_validation:.5f} -> {args.output}")

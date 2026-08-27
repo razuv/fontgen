@@ -138,10 +138,9 @@ class FontgenNet(nn.Module):
         refined = self.raster_refiner[5](self.raster_refiner[4](self.raster_refiner[3](refined)))
         raster_logits = raster_logits + self.raster_refiner[6](refined)
         coordinate_grid = self.sdf_coordinate_grid.unsqueeze(0).expand(raster_logits.shape[0], -1, -1, -1)
-        sdf_features = torch.cat((
-            torch.tanh(raster_logits / self.config.sdf_logit_scale), coordinate_grid,
-        ), dim=1)
-        raster_logits = raster_logits + self.sdf_coordinate_refiner(sdf_features)
+        sdf_seed = raster_logits.detach() / self.config.sdf_logit_scale
+        sdf_features = torch.cat((torch.tanh(sdf_seed), coordinate_grid), dim=1)
+        sdf_logits = sdf_seed + 0.35 * torch.tanh(self.sdf_coordinate_refiner(sdf_features))
         raster_features = self.raster_encoder(torch.sigmoid(raster_logits))
         memory_token = content_token + self.raster_to_model(raster_features)
         memory = memory_token.unsqueeze(1)
@@ -150,7 +149,8 @@ class FontgenNet(nn.Module):
             "metrics": self.metrics_head(memory_token),
             "style": style,
             "raster": raster_logits,
-            "sdf": torch.tanh(raster_logits / self.config.sdf_logit_scale),
+            "sdf_logits": sdf_logits,
+            "sdf": torch.tanh(sdf_logits),
             "recognition": self.recognition_head(raster_features),
             "category": self.category_head(style),
             "prompt_category": self.prompt_category_head(prompt_context),

@@ -121,31 +121,22 @@ inference checkpoint is `checkpoints/fontgen-style-v4.1-autotagged-inference.pt`
 V4.1 can now continue from the existing checkpoint with a signed-distance target. The zero level
 set gives a sub-pixel boundary, while normal, Eikonal, curvature and multi-scale losses penalize
 crooked stems and local blobs. A zero-initialized coordinate-aware residual refiner keeps old
-checkpoints load-compatible. Train the curriculum in order and reset the validation baseline when
-the stage changes:
+checkpoints load-compatible. The production-safe mode freezes V4.1 and trains only the bounded
+2,977-parameter SDF correction on the full style corpus:
 
 ```bash
 python scripts/train.py data/fontgen-v4-autotagged-raster.jsonl \
-  --raster-only --balanced-styles --curriculum-stage anatomy \
+  --raster-only --sdf-refiner-only --balanced-styles --curriculum-stage full \
   --resume checkpoints/fontgen-style-v4.1-autotagged-inference.pt --reset-best \
-  --learning-rate 5e-5 --batch-size 16 --samples-per-epoch 8192 \
-  --validation-batches 32 --epochs 53 --output checkpoints/fontgen-v4.1-sdf-anatomy.pt
-
-python scripts/train.py data/fontgen-v4-autotagged-raster.jsonl \
-  --raster-only --balanced-styles --curriculum-stage axes \
-  --resume checkpoints/fontgen-v4.1-sdf-anatomy.pt --reset-best \
-  --learning-rate 5e-5 --batch-size 16 --samples-per-epoch 8192 \
-  --validation-batches 32 --epochs 57 --output checkpoints/fontgen-v4.1-sdf-axes.pt
-
-python scripts/train.py data/fontgen-v4-autotagged-raster.jsonl \
-  --raster-only --balanced-styles --curriculum-stage full \
-  --resume checkpoints/fontgen-v4.1-sdf-axes.pt --reset-best \
-  --learning-rate 3e-5 --batch-size 16 --samples-per-epoch 8192 \
-  --validation-batches 32 --epochs 61 --output checkpoints/fontgen-v4.1-sdf.pt
+  --learning-rate 2e-4 --batch-size 32 --samples-per-epoch 8192 \
+  --validation-batches 16 --epochs 50 --output checkpoints/fontgen-v4.1-sdf-refiner.pt
 ```
 
 `--epochs` is the absolute final epoch stored in the checkpoint. The upgraded network has
-4,652,178 parameters and remains below the five-million V4 limit.
+4,652,178 parameters and remains below the five-million V4 limit. Inference applies the learned
+level set only when component count, Euler topology, area and IoU match the original V4.1 field;
+otherwise it falls back per glyph. Full raster/geometry curriculum fine-tunes remain experimental:
+they lowered pixel validation but broke counters and stems on held-out custom prompts.
 
 ### Expanded local corpus
 

@@ -75,6 +75,27 @@ def _limited_handle(anchor: np.ndarray, candidate: np.ndarray, chord: float) -> 
     return anchor + offset * (maximum / length)
 
 
+def topology_safe_field(base: np.ndarray, candidate: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+    """Accept a refined level set only when coarse glyph topology is unchanged."""
+    base_binary = np.asarray(base >= threshold, dtype=np.bool_)
+    candidate_binary = np.asarray(candidate >= threshold, dtype=np.bool_)
+    base_components = int(measure.label(base_binary, connectivity=2).max())
+    candidate_components = int(measure.label(candidate_binary, connectivity=2).max())
+    if base_components != candidate_components:
+        return base
+    if measure.euler_number(base_binary, connectivity=2) != measure.euler_number(candidate_binary, connectivity=2):
+        return base
+    base_area = int(base_binary.sum())
+    candidate_area = int(candidate_binary.sum())
+    if abs(candidate_area - base_area) / max(base_area, 1) > 0.06:
+        return base
+    intersection = int((base_binary & candidate_binary).sum())
+    union = int((base_binary | candidate_binary).sum())
+    if intersection / max(union, 1) < 0.92:
+        return base
+    return candidate
+
+
 def vectorize_mask(
     mask: np.ndarray,
     threshold: float = 0.48,

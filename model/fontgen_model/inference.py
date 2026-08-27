@@ -11,7 +11,7 @@ from .config import ModelConfig
 from .network import FontgenNet
 from .outline import COMMAND_TO_ID, COMMANDS
 from .text import condition_v41_prompt, encode_prompt, glyph_bucket
-from .vectorize import vectorize_mask
+from .vectorize import topology_safe_field, vectorize_mask
 
 POINTS_PER_COMMAND = {"M": 1, "L": 1, "Q": 2, "C": 3, "Z": 0}
 
@@ -124,11 +124,13 @@ class FontgenGenerator:
         )
         control_tensor = torch.tensor([controls], dtype=torch.float32, device=self.device).repeat(batch_size, 1)
         conditioned = self.model.condition(prompts, glyph_ids, control_tensor)
-        fields = ((conditioned["sdf"] + 1) * 0.5).detach().cpu().numpy()[:, 0]
+        base_fields = torch.sigmoid(conditioned["raster"]).detach().cpu().numpy()[:, 0]
+        refined_fields = ((conditioned["sdf"] + 1) * 0.5).detach().cpu().numpy()[:, 0]
         metrics_batch = conditioned["metrics"].detach().cpu().numpy()
         generated: dict[str, GeneratedGlyph] = {}
         for index, character in enumerate(drawable):
-            outline = vectorize_mask(fields[index], threshold=0.5, contrast=controls[2], roundness=controls[3])
+            field = topology_safe_field(base_fields[index], refined_fields[index])
+            outline = vectorize_mask(field, threshold=0.5, contrast=controls[2], roundness=controls[3])
             if controls[4]:
                 shear = math.tan(math.radians(float(controls[4]) * 18.0))
                 for coordinates in outline.coordinates:

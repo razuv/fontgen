@@ -30,14 +30,17 @@ balanced sampling по 8 192 примера и снизили новую validat
 
 ### V4.1 SDF refinement
 
-Совместимый SDF-апгрейд сохраняет prompt/style/glyph encoders и старые raster-веса. Выходной logit
-одновременно задаёт occupancy и нормализованное signed distance field; нулевая изолиния становится
-sub-pixel контуром. Новый coordinate-aware residual refiner инициализируется нулём, поэтому старый
-checkpoint до первого fine-tune воспроизводит прежний силуэт. SDF regression получает повышенный
+Совместимый SDF-апгрейд сохраняет prompt/style/glyph encoders и старые raster-веса. Raster-ветка
+по-прежнему задаёт occupancy, а отдельный bounded residual уточняет signed distance field; его
+нулевая изолиния становится sub-pixel контуром. Новый coordinate-aware residual refiner
+инициализируется нулём, поэтому старый checkpoint до первого fine-tune воспроизводит прежний силуэт.
+SDF regression получает повышенный
 вес около границы, normal alignment выравнивает касательные, Eikonal stabilizes distance gradient,
 curvature loss подавляет локальные волны, а 32/64/128 multi-scale supervision сохраняет крупную
-анатомию и просветы. Curriculum проходит стадии `anatomy → axes → full`, не смешивая экстремальные
-display/handwriting/italic примеры с первоначальным изучением конструкции букв.
+анатомию и просветы. Принятый production-режим замораживает исходную V4.1 и обучает только bounded
+SDF residual. На inference topology guard проверяет connected components, Euler number, площадь и
+IoU; небезопасная коррекция отклоняется отдельно для каждого глифа. Полное обновление raster decoder
+отклонено после specimen-gate: validation снижалась, но появлялись разрывы штрихов и закрытые просветы.
 
 ## Архитектура v5 (следующий качественный этап)
 

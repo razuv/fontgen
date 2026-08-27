@@ -90,14 +90,18 @@ def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch
     sdf_loss, normal_loss, eikonal_loss, curvature_loss = _sdf_geometry_losses(
         output["sdf"], batch["sdf"],
     )
+    sdf_occupancy_loss = functional.binary_cross_entropy_with_logits(
+        output["sdf_logits"] * 4.0, batch["raster"],
+    )
     multiscale_loss = _multiscale_occupancy_loss(output["raster"], batch["raster"])
+    sdf_multiscale_loss = _multiscale_occupancy_loss(output["sdf_logits"] * 4.0, batch["raster"])
     total = (
         metrics_loss * 2.0 + raster_loss * 2.0 + dice_loss * 2.0
         + recognition_loss + category_loss * 0.4 + prompt_category_loss
         + prompt_control_loss * 1.5 + style_variance_loss * 0.5
-        + edge_loss + entropy_loss * 0.05 + sdf_loss * 6.0
-        + normal_loss * 0.8 + eikonal_loss * 1.5 + curvature_loss * 0.75
-        + multiscale_loss * 1.5
+        + edge_loss + entropy_loss * 0.05 + sdf_loss * 3.0
+        + normal_loss * 0.6 + eikonal_loss + curvature_loss * 0.5
+        + multiscale_loss * 1.5 + sdf_occupancy_loss * 3.0 + sdf_multiscale_loss
     )
     return {
         "total": total, "metrics": metrics_loss, "raster": raster_loss,
@@ -107,6 +111,7 @@ def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch
         "style_variance": style_variance_loss, "entropy": entropy_loss,
         "sdf": sdf_loss, "normals": normal_loss, "eikonal": eikonal_loss,
         "curvature": curvature_loss, "multiscale": multiscale_loss,
+        "sdf_occupancy": sdf_occupancy_loss, "sdf_multiscale": sdf_multiscale_loss,
     }
 
 

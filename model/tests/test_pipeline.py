@@ -11,7 +11,7 @@ from fontgen_model.outline import COMMAND_TO_ID, extract_glyph
 from fontgen_model.raster import glyph_mask, outline_mask, signed_distance_field
 from fontgen_model.text import SUPPORTED_CHARACTERS, condition_v41_prompt, glyph_bucket
 from fontgen_model.training import training_loss
-from fontgen_model.vectorize import vectorize_mask
+from fontgen_model.vectorize import topology_safe_field, vectorize_mask
 
 
 def tiny_config() -> ModelConfig:
@@ -121,6 +121,23 @@ def test_v41_prompt_conditioning_recognizes_free_typographic_language() -> None:
     assert controls[1] < 0
     assert controls[2] > 0
     assert controls[3] > 0
+
+
+def test_topology_guard_rejects_a_broken_counter() -> None:
+    base = np.zeros((32, 32), dtype=np.float32)
+    base[5:27, 5:27] = 1
+    base[11:21, 11:21] = 0
+    broken = base.copy()
+    broken[5:16, 15:17] = 0
+    assert topology_safe_field(base, broken) is base
+
+
+def test_topology_guard_accepts_a_small_boundary_correction() -> None:
+    base = np.zeros((32, 32), dtype=np.float32)
+    base[6:26, 6:26] = 1
+    refined = base.copy()
+    refined[6, 6] = 0
+    assert topology_safe_field(base, refined) is refined
 
 
 def test_vector_manifest_outline_raster_matches_source_glyph() -> None:
