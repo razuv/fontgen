@@ -1,0 +1,88 @@
+{
+  "format": "fontgen-portable-jsonl-gzip-v1",
+  "source": "local-font-library",
+  "rows": 58217,
+  "contains_font_binaries": false,
+  "self_contained_fields": [
+    "commands",
+    "coordinates",
+    "raster",
+    "prompt",
+    "controls",
+    "metrics"
+  ],
+  "shards": [
+    {
+      "file": "local-glyphs-0001.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6255622,
+      "sha256": "a802623f4d8d0095bcfc742fa6802ee0bdf21fe7e15bdb391c456239d6380c52"
+    },
+    {
+      "file": "local-glyphs-0002.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6689385,
+      "sha256": "f5b317041e627e08cbdb6e7d918187c0d06787510dd20645181aef9b3cdd74c4"
+    },
+    {
+      "file": "local-glyphs-0003.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6143692,
+      "sha256": "2fb9a0fe2d647c782e6ee40f81e5f0bdc97de8898e90c7614ed43a7685fba8f2"
+    },
+    {
+      "file": "local-glyphs-0004.jsonl.gz",
+      "rows": 5000,
+      "bytes": 5618996,
+      "sha256": "b529dd2826d53eae2db30dc9395aad4ab87b0e962b9ce75de5aed58892d20996"
+    },
+    {
+      "file": "local-glyphs-0005.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6208929,
+      "sha256": "0cb737eadf47e13a74103e25989eff37d03d0d0966789117df9d2028cac70203"
+    },
+    {
+      "file": "local-glyphs-0006.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6015003,
+      "sha256": "da0ff52686709bf85ddceef6506fc5e52116c845f446ca97210d28427a61969c"
+    },
+    {
+      "file": "local-glyphs-0007.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6322162,
+      "sha256": "ed459c3d1a5a8d309af9e28beae547b39e0e9ea6a856082fabe4b3c644b781bb"
+    },
+    {
+      "file": "local-glyphs-0008.jsonl.gz",
+      "rows": 5000,
+      "bytes": 5897349,
+      "sha256": "2d249980910c91b334fd7537c6268f4c4ae981984afb74024dafbe2328da85b3"
+    },
+    {
+      "file": "local-glyphs-0009.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6209273,
+      "sha256": "3ff936635d03b0bdc113b7b20b62759abb886922f79697f911bb812163b419a0"
+    },
+    {
+      "file": "local-glyphs-0010.jsonl.gz",
+      "rows": 5000,
+      "bytes": 5363537,
+      "sha256": "3d8754a84277e3bb488a56b1a52c730717092d609787d564105fe1080ef3cf86"
+    },
+    {
+      "file": "local-glyphs-0011.jsonl.gz",
+      "rows": 5000,
+      "bytes": 6590375,
+      "sha256": "d5a4ec615f39b031119e4667ec011165bbd17d4b5d7dec6d33d7349e824452b3"
+    },
+    {
+      "file": "local-glyphs-0012.jsonl.gz",
+      "rows": 3217,
+      "bytes": 3983977,
+      "sha256": "7e8871aeea6be5b59b0c54ad9d69d230507e2589514e4312d9ce0c9ae9c5be10"
+    }
+  ]
+}

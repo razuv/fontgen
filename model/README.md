@@ -154,6 +154,27 @@ python scripts/prepare_v5_embeddings.py \
   data/fontgen-v5-expanded.jsonl data/v5-expanded-prompt-embeddings.pt
 ```
 
+### Portable local glyph corpus
+
+The repository includes a self-contained copy of all deduplicated local glyph examples in
+`portable-dataset/local-glyphs-v4/`. It contains extracted Bézier commands, coordinates, prompts,
+controls, metrics and V4 raster targets, but no TTF/OTF font binaries and no absolute local paths.
+After cloning on another computer, restore the training manifest and train normally:
+
+```bash
+python scripts/portable_dataset.py restore \
+  portable-dataset/local-glyphs-v4 data/local-glyphs-portable.jsonl
+python scripts/train.py data/local-glyphs-portable.jsonl \
+  --raster-only --balanced-styles --output checkpoints/local-finetune.pt
+```
+
+Checksums and row counts are verified during restore. To rebuild the bundle from the merged corpus:
+
+```bash
+python scripts/portable_dataset.py pack data/fontgen-v4-autotagged-raster.jsonl \
+  portable-dataset/local-glyphs-v4 --rows-per-shard 5000
+```
+
 Current expanded manifest: 97,347 glyphs, 496 families and 767 faces. Of these, 58,217 unique
 rows come from the local font library and 39,130 from Google Fonts. V5 uses sqrt-balanced style
 sampling by default so that the larger sans-serif share does not drown out serif, display,
