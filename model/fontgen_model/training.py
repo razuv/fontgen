@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from torch import nn
 from torch.nn import functional
 
 from .outline import COMMANDS, COORDINATE_MASKS
@@ -54,7 +55,79 @@ def _multiscale_occupancy_loss(logits: torch.Tensor, target: torch.Tensor) -> to
     return torch.stack(losses).mean()
 
 
-def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+class PerceptualLoss(nn.Module):
+    """Lightweight perceptual loss using a small frozen feature extractor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, 3, 1, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, 3, 2, 1), nn.ReLU(inplace=True),
+        )
+        for param in self.features.parameters():
+            param.requires_grad_(False)
+
+    def forward(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_features = self.features(predicted)
+        target_features = self.features(target)
+        return functional.smooth_l1_loss(pred_features, target_features, beta=0.01)
+
+
+class UncertaintyWeights(nn.Module):
+    """Learnable loss weights via homoscedastic uncertainty (Kendall et al.)."""
+
+    def __init__(self, num_losses: int) -> None:
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_losses))
+
+    def forward(self, losses: list[torch.Tensor]) -> torch.Tensor:
+        total = torch.zeros(1, device=losses[0].device)
+        for i, loss in enumerate(losses):
+            precision = torch.exp(-self.log_vars[i])
+            total = total + precision * loss + self.log_vars[i]
+        return total
+
+
+def _family_consistency_loss(styles: torch.Tensor, families: list[str]) -> torch.Tensor:
+    """Pull style vectors of the same family together."""
+    if len(families) < 2:
+        return styles.sum() * 0
+    unique_families = list(dict.fromkeys(families))
+    losses = []
+    for family in unique_families:
+        indices = [i for i, f in enumerate(families) if f == family]
+        if len(indices) < 2:
+            continue
+        family_styles = styles[indices]
+        centroid = family_styles.mean(dim=0, keepdim=True)
+        losses.append(functional.mse_loss(family_styles, centroid.expand_as(family_styles)))
+    return torch.stack(losses).mean() if losses else styles.sum() * 0
+
+
+def _discriminator_r1_penalty(real: torch.Tensor, discriminator: nn.Module) -> torch.Tensor:
+    """R1 gradient penalty for discriminator stability."""
+    real.requires_grad_(True)
+    pred = discriminator(real)
+    grad = torch.autograd.grad(pred.sum(), real, create_graph=True)[0]
+    return grad.flatten(1).square().sum(dim=1).mean()
+
+
+def _contour_smoothness_loss(coordinates: torch.Tensor, commands: torch.Tensor) -> torch.Tensor:
+    """Penalize high-frequency jitter in generated outlines."""
+    drawable = commands.ge(3) & commands.le(6)
+    if not drawable.any():
+        return coordinates.sum() * 0
+    diffs = coordinates[:, 1:] - coordinates[:, :-1]
+    return diffs.square().mean()
+
+
+def raster_training_loss(
+    batch: dict[str, torch.Tensor],
+    output: dict[str, torch.Tensor],
+    *,
+    perceptual: PerceptualLoss | None = None,
+) -> dict[str, torch.Tensor]:
     metrics_loss = functional.smooth_l1_loss(output["metrics"], batch["metrics"], beta=0.02)
     raster_loss = functional.binary_cross_entropy_with_logits(output["raster"], batch["raster"])
     probability = torch.sigmoid(output["raster"])
@@ -95,6 +168,15 @@ def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch
     )
     multiscale_loss = _multiscale_occupancy_loss(output["raster"], batch["raster"])
     sdf_multiscale_loss = _multiscale_occupancy_loss(output["sdf_logits"] * 4.0, batch["raster"])
+
+    perceptual_loss = torch.tensor(0.0, device=probability.device)
+    if perceptual is not None:
+        perceptual_loss = perceptual(probability, batch["raster"])
+
+    family_loss = torch.tensor(0.0, device=probability.device)
+    if "family" in batch and isinstance(batch["family"], (list, tuple)):
+        family_loss = _family_consistency_loss(output["style"], batch["family"])
+
     total = (
         metrics_loss * 2.0 + raster_loss * 2.0 + dice_loss * 2.0
         + recognition_loss + category_loss * 0.4 + prompt_category_loss
@@ -102,6 +184,7 @@ def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch
         + edge_loss + entropy_loss * 0.05 + sdf_loss * 3.0
         + normal_loss * 0.6 + eikonal_loss + curvature_loss * 0.5
         + multiscale_loss * 1.5 + sdf_occupancy_loss * 3.0 + sdf_multiscale_loss
+        + perceptual_loss * 0.5 + family_loss * 0.3
     )
     return {
         "total": total, "metrics": metrics_loss, "raster": raster_loss,
@@ -112,7 +195,23 @@ def raster_training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch
         "sdf": sdf_loss, "normals": normal_loss, "eikonal": eikonal_loss,
         "curvature": curvature_loss, "multiscale": multiscale_loss,
         "sdf_occupancy": sdf_occupancy_loss, "sdf_multiscale": sdf_multiscale_loss,
+        "perceptual": perceptual_loss, "family_consistency": family_loss,
     }
+
+
+def discriminator_loss(
+    real_logits: torch.Tensor,
+    fake_logits: torch.Tensor,
+) -> torch.Tensor:
+    """Non-saturating logistic GAN discriminator loss."""
+    real_loss = functional.softplus(-real_logits).mean()
+    fake_loss = functional.softplus(fake_logits).mean()
+    return (real_loss + fake_loss) * 0.5
+
+
+def generator_adversarial_loss(fake_logits: torch.Tensor) -> torch.Tensor:
+    """Non-saturating logistic GAN generator loss."""
+    return functional.softplus(-fake_logits).mean()
 
 
 def training_loss(batch: dict[str, torch.Tensor], output: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

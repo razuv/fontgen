@@ -25,7 +25,7 @@ class FontgenNet(nn.Module):
             d_model=d, nhead=config.heads, dim_feedforward=config.feedforward,
             dropout=config.dropout, batch_first=True, norm_first=True,
         )
-        self.prompt_encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers)
+        self.prompt_encoder = nn.TransformerEncoder(encoder_layer, config.encoder_layers, enable_nested_tensor=False)
         self.style_projection = nn.Sequential(
             nn.Linear(d + config.control_dimensions, d), nn.SiLU(),
             nn.Linear(d, config.style_dimensions),
@@ -175,3 +175,19 @@ class FontgenNet(nn.Module):
             "commands": self.command_head(decoded),
             "coordinates": self.coordinate_head(decoded),
         }
+
+
+class PatchDiscriminator(nn.Module):
+    """Lightweight patch-based discriminator for rasterized glyph masks."""
+
+    def __init__(self, in_channels: int = 1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(32, 64, 4, 2, 1), nn.GroupNorm(8, 64), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.GroupNorm(8, 128), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 1, 4, 1, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)

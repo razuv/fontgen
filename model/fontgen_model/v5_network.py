@@ -55,7 +55,7 @@ class VectorFontNet(nn.Module):
             norm_first=True,
             activation="gelu",
         )
-        self.refiner = nn.TransformerEncoder(refiner_layer, config.refiner_layers)
+        self.refiner = nn.TransformerEncoder(refiner_layer, config.refiner_layers, enable_nested_tensor=False)
         self.refiner_norm = nn.LayerNorm(d)
         self.refined_command_head = nn.Linear(d, config.command_count)
         self.coordinate_delta_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 6), nn.Tanh())

@@ -40,6 +40,7 @@ class GenerationRequest(BaseModel):
     characters: str = Field(default=DEFAULT_CHARSET, min_length=1, max_length=320)
     controls: Controls = Field(default_factory=Controls)
     seed: int = Field(default=17, ge=0, le=2**32 - 1)
+    cfg_scale: float = Field(default=1.0, ge=1.0, le=5.0, description="Classifier-free guidance scale")
 
     @field_validator("characters")
     @classmethod
@@ -65,6 +66,7 @@ class Generator(Protocol):
 
     def generate_family(
         self, prompt: str, characters: str, controls: list[float], seed: int,
+        *, cfg_scale: float = 1.0,
     ) -> list[object]: ...
 
 
@@ -112,7 +114,10 @@ def health() -> dict[str, object]:
 def generate(request: GenerationRequest) -> GenerationResponse:
     if generator is None:
         raise HTTPException(status_code=503, detail="Fontgen checkpoint is not loaded. Train a checkpoint and set FONTGEN_CHECKPOINT.")
-    glyphs = generator.generate_family(request.prompt, request.characters, request.controls.vector(), request.seed)
+    glyphs = generator.generate_family(
+        request.prompt, request.characters, request.controls.vector(), request.seed,
+        cfg_scale=request.cfg_scale,
+    )
     return GenerationResponse(
         family_name=request.family_name,
         checkpoint=generator.checkpoint_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,19 @@ CATEGORY_TO_ID = {name: index for index, name in enumerate(("SANS_SERIF", "SERIF
 
 
 class OutlineDataset(Dataset[dict[str, torch.Tensor]]):
-    def __init__(self, manifest: Path, config: ModelConfig):
+    def __init__(
+        self,
+        manifest: Path,
+        config: ModelConfig,
+        *,
+        augment: bool = False,
+        control_jitter: float = 0.1,
+        cfg_dropout: float = 0.0,
+    ):
         self.config = config
+        self.augment = augment
+        self.control_jitter = control_jitter
+        self.cfg_dropout = cfg_dropout
         with manifest.open(encoding="utf-8") as source:
             self.rows = [json.loads(line) for line in source if line.strip()]
 
@@ -39,14 +51,24 @@ class OutlineDataset(Dataset[dict[str, torch.Tensor]]):
                 dtype=np.float32,
             ) / 255.0
         )
+        controls = list(row["controls"])
+        if self.augment:
+            controls = [
+                max(-1.0, min(1.0, c + random.gauss(0, self.control_jitter)))
+                for c in controls
+            ]
+        prompt_text = row["prompt"]
+        if self.cfg_dropout > 0 and random.random() < self.cfg_dropout:
+            prompt_text = ""
         return {
-            "prompt": encode_prompt(row["prompt"], self.config.max_prompt_bytes),
+            "prompt": encode_prompt(prompt_text, self.config.max_prompt_bytes),
             "glyph_id": torch.tensor(glyph_bucket(row["character"], self.config.glyph_buckets)),
             "category_id": torch.tensor(CATEGORY_TO_ID.get(row.get("category"), 0)),
-            "controls": torch.tensor(row["controls"], dtype=torch.float32),
+            "controls": torch.tensor(controls, dtype=torch.float32),
             "commands": commands,
             "coordinates": coordinates,
             "metrics": torch.tensor([row["advance_width"], row["left_side_bearing"]], dtype=torch.float32),
             "raster": torch.from_numpy(raster).unsqueeze(0),
             "sdf": torch.from_numpy(signed_distance_field(raster)).unsqueeze(0),
+            "family": str(row.get("family", "")),
         }

@@ -72,8 +72,17 @@ def test_prompt_hash_seed_accepts_full_uint32_range() -> None:
 
 
 def test_compact_model_stays_below_five_million_parameters() -> None:
-    count = sum(parameter.numel() for parameter in FontgenNet(ModelConfig()).parameters())
+    compact = ModelConfig(
+        max_prompt_bytes=192, max_commands=128, d_model=176, heads=8,
+        encoder_layers=3, decoder_layers=4, feedforward=704, style_dimensions=112,
+    )
+    count = sum(parameter.numel() for parameter in FontgenNet(compact).parameters())
     assert 4_000_000 < count <= 5_000_000
+
+
+def test_scaled_model_stays_below_fifteen_million_parameters() -> None:
+    count = sum(parameter.numel() for parameter in FontgenNet(ModelConfig()).parameters())
+    assert 8_000_000 < count <= 15_000_000
 
 
 def test_supported_latin_and_cyrillic_characters_have_unique_ids() -> None:

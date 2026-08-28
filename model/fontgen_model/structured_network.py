@@ -35,7 +35,7 @@ class StructuredVectorFontNet(nn.Module):
             d_model=d, nhead=config.heads, dim_feedforward=config.feedforward,
             dropout=config.dropout, batch_first=True, norm_first=True, activation="gelu",
         )
-        self.geometry_decoder = nn.TransformerEncoder(geometry_layer, config.geometry_layers)
+        self.geometry_decoder = nn.TransformerEncoder(geometry_layer, config.geometry_layers, enable_nested_tensor=False)
         self.geometry_norm = nn.LayerNorm(d)
         self.initial_coordinate_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 4), nn.Tanh())
 
@@ -44,7 +44,7 @@ class StructuredVectorFontNet(nn.Module):
             d_model=d, nhead=config.heads, dim_feedforward=config.feedforward,
             dropout=config.dropout, batch_first=True, norm_first=True, activation="gelu",
         )
-        self.vector_refiner = nn.TransformerEncoder(refiner_layer, config.refiner_layers)
+        self.vector_refiner = nn.TransformerEncoder(refiner_layer, config.refiner_layers, enable_nested_tensor=False)
         self.refiner_norm = nn.LayerNorm(d)
         self.coordinate_delta_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 4), nn.Tanh())
 

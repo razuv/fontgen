@@ -7,17 +7,23 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
+from tqdm import tqdm
 
 from fontgen_model.v5_config import V5Config
 from fontgen_model.v5_dataset import VectorOutlineDataset
 from fontgen_model.v5_loss import vector_training_loss
 from fontgen_model.v5_network import VectorFontNet
+from scripts.select_tier import resolve_tier
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the v5 direct-vector font model")
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("embeddings", type=Path)
+    parser.add_argument("manifest", type=Path, nargs="?", default=None,
+                        help="Path to JSONL manifest (omit if using --dataset-tier)")
+    parser.add_argument("--dataset-tier", type=int, default=None,
+                        help="Use pre-built tier dataset (500, 1000, 2000, 5000, 10000)")
+    parser.add_argument("embeddings", type=Path, nargs="?", default=None,
+                        help="Path to cached MiniLM embeddings")
     parser.add_argument("--output", type=Path, default=Path("checkpoints/fontgen-vector-v5.pt"))
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=12)
@@ -33,6 +39,9 @@ def main() -> None:
         help="Use sqrt-balanced category sampling and boost italic/rounded examples",
     )
     args = parser.parse_args()
+    args.manifest = resolve_tier(args.dataset_tier, args.manifest)
+    if args.embeddings is None:
+        parser.error("embeddings path is required (positional argument)")
 
     resumed = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
     config = V5Config(**resumed["config"]) if resumed else (
@@ -85,12 +94,13 @@ def main() -> None:
         start_epoch = int(resumed.get("epoch", 0))
         best_validation = float(resumed.get("best_validation", best_validation))
 
-    def run(loader: DataLoader, training_mode: bool) -> float:
+    def run(loader: DataLoader, training_mode: bool, desc: str = "batch") -> float:
         model.train(training_mode)
         totals: list[float] = []
         context = torch.enable_grad() if training_mode else torch.inference_mode()
         with context:
-            for batch_index, batch in enumerate(loader):
+            batch_iter = tqdm(loader, desc=desc, unit="batch", leave=False)
+            for batch_index, batch in enumerate(batch_iter):
                 if args.max_batches is not None and batch_index >= args.max_batches:
                     break
                 batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
@@ -105,14 +115,16 @@ def main() -> None:
                     scaler.scale(losses["total"]).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
+                    optimizer.step()
                     scaler.update()
-                totals.append(float(losses["total"].detach()))
+                batch_loss = float(losses["total"].detach())
+                totals.append(batch_loss)
+                batch_iter.set_postfix(loss=f"{batch_loss:.4f}")
         return sum(totals) / max(1, len(totals))
 
     for epoch in range(start_epoch, args.epochs):
-        train_loss = run(training_loader, True)
-        validation_loss = run(validation_loader, False)
+        train_loss = run(training_loader, True, desc=f"train {epoch + 1:03d}")
+        validation_loss = run(validation_loader, False, desc=f"val   {epoch + 1:03d}")
         print(
             f"epoch={epoch + 1:03d} train={train_loss:.5f} validation={validation_loss:.5f} "
             f"families={len(training_families)}/{len(validation_families)} device={device}"

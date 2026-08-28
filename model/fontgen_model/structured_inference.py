@@ -18,7 +18,8 @@ class StructuredFontGenerator:
 
     architecture = "structured-quadratic-v1"
 
-    def __init__(self, checkpoint_path: Path, device: str | None = None):
+    def __init__(self, checkpoint_path: Path | str, device: str | None = None):
+        checkpoint_path = Path(checkpoint_path)
         selected = device or (
             "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         )
@@ -49,7 +50,8 @@ class StructuredFontGenerator:
 
     @torch.inference_mode()
     def generate_family(
-        self, prompt: str, characters: str, controls: list[float], seed: int, temperature: float = 0.65,
+        self, prompt: str, characters: str, controls: list[float], seed: int,
+        *, cfg_scale: float = 1.0, temperature: float = 0.65,
     ) -> list[GeneratedGlyph]:
         prompt_embedding = self.text_encoder.encode([prompt]).to(self.device)
         random = torch.Generator(device="cpu").manual_seed(seed)

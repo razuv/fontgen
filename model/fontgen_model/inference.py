@@ -28,7 +28,8 @@ class GeneratedGlyph:
 class FontgenGenerator:
     architecture = "fontgen-style-film-vector-v4.1-local-refined"
 
-    def __init__(self, checkpoint_path: Path, device: str | None = None):
+    def __init__(self, checkpoint_path: Path | str, device: str | None = None):
+        checkpoint_path = Path(checkpoint_path)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         self.config = ModelConfig(**checkpoint["config"])
@@ -109,6 +110,8 @@ class FontgenGenerator:
         characters: str,
         controls: list[float],
         seed: int,
+        *,
+        cfg_scale: float = 1.0,
     ) -> list[GeneratedGlyph]:
         del seed  # v1 raster generator is deterministic for a prompt and control vector.
         prompt, controls = condition_v41_prompt(prompt, controls)
@@ -124,8 +127,18 @@ class FontgenGenerator:
         )
         control_tensor = torch.tensor([controls], dtype=torch.float32, device=self.device).repeat(batch_size, 1)
         conditioned = self.model.condition(prompts, glyph_ids, control_tensor)
-        base_fields = torch.sigmoid(conditioned["raster"]).detach().cpu().numpy()[:, 0]
-        refined_fields = ((conditioned["sdf"] + 1) * 0.5).detach().cpu().numpy()[:, 0]
+
+        if cfg_scale > 1.0:
+            null_prompts = torch.zeros_like(prompts)
+            uncond = self.model.condition(null_prompts, glyph_ids, control_tensor)
+            raster_logits = uncond["raster"] + cfg_scale * (conditioned["raster"] - uncond["raster"])
+            sdf_logits = uncond["sdf_logits"] + cfg_scale * (conditioned["sdf_logits"] - uncond["sdf_logits"])
+            base_fields = torch.sigmoid(raster_logits).detach().cpu().numpy()[:, 0]
+            refined_fields = ((torch.tanh(sdf_logits) + 1) * 0.5).detach().cpu().numpy()[:, 0]
+        else:
+            base_fields = torch.sigmoid(conditioned["raster"]).detach().cpu().numpy()[:, 0]
+            refined_fields = ((conditioned["sdf"] + 1) * 0.5).detach().cpu().numpy()[:, 0]
+
         metrics_batch = conditioned["metrics"].detach().cpu().numpy()
         generated: dict[str, GeneratedGlyph] = {}
         for index, character in enumerate(drawable):
